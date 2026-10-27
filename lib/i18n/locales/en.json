@@ -1534,6 +1534,7 @@
   "scheduledTasks.runStartedOpen": "Click to open its session.",
   "scheduledTasks.alreadyRunning": "{name} is already running",
   "scheduledTasks.runFailed": "Could not start {name}",
+  "scheduledTasks.runSkipped": "{name} was skipped",
   "scheduledTasks.toggleFailed": "Could not update {name}",
   "scheduledTasks.deleteTitle": "Delete scheduled task?",
   "scheduledTasks.deleteBody": "\"{name}\" will no longer run. Sessions from earlier runs stay in the sidebar.",

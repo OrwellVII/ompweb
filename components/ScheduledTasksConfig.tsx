@@ -153,7 +153,16 @@ export function ScheduledTasksConfig({ cwd, onOpenSession }: { cwd: string | nul
       .catch(() => {});
   }, []);
 
-  const dateTime = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }), [locale]);
+  const timeZone = data?.timeZone ?? "";
+  // Run times are instants; show them in the server's zone, as the panel
+  // labels them. A zone this browser does not know falls back to its own.
+  const dateTime = useMemo(() => {
+    try {
+      return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", ...(timeZone ? { timeZone } : {}) });
+    } catch {
+      return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
+    }
+  }, [locale, timeZone]);
   const formatInstant = useCallback((iso: string) => {
     const date = new Date(iso);
     return Number.isNaN(date.getTime()) ? iso : dateTime.format(date);
@@ -170,7 +179,6 @@ export function ScheduledTasksConfig({ cwd, onOpenSession }: { cwd: string | nul
   }, [data?.runs]);
 
   const tasks = data?.tasks ?? [];
-  const timeZone = data?.timeZone ?? "";
 
   const setEnabled = async (task: ListedTask, enabled: boolean) => {
     setBusyTaskId(task.id);
@@ -191,12 +199,20 @@ export function ScheduledTasksConfig({ cwd, onOpenSession }: { cwd: string | nul
       const res = await fetch(`/api/scheduled-tasks/${encodeURIComponent(task.id)}/run`, { method: "POST" });
       const body = await readJson<ErrorBody & { run?: ScheduledTaskRun }>(res);
       if (res.ok) {
-        const sessionId = body?.run?.sessionId ?? null;
-        toast.success(
-          t("scheduledTasks.runStarted", { name: task.name }),
-          sessionId && onOpenSession ? t("scheduledTasks.runStartedOpen") : undefined,
-          sessionId && onOpenSession ? { onClick: () => onOpenSession(sessionId) } : undefined,
-        );
+        // 202 also carries runs that were skipped or failed to start.
+        const run = body?.run;
+        const sessionId = run?.sessionId ?? null;
+        if (run?.status === "failed") {
+          toast.error(t("scheduledTasks.runFailed", { name: task.name }), run.error ?? undefined);
+        } else if (run?.status === "skipped") {
+          toast.info(t("scheduledTasks.runSkipped", { name: task.name }), run.error ?? undefined);
+        } else {
+          toast.success(
+            t("scheduledTasks.runStarted", { name: task.name }),
+            sessionId && onOpenSession ? t("scheduledTasks.runStartedOpen") : undefined,
+            sessionId && onOpenSession ? { onClick: () => onOpenSession(sessionId) } : undefined,
+          );
+        }
       } else if (res.status === 409 && body?.code === "scheduled_task_running") {
         toast.info(t("scheduledTasks.alreadyRunning", { name: task.name }));
       } else {

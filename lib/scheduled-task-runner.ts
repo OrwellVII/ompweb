@@ -2,7 +2,15 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { allowFileRoot } from "./file-access";
 import { getRpcSession, resolveSpawnCwdResult, startRpcSession } from "./rpc-manager";
-import { claimScheduledSlot, loadScheduledTaskStore, pruneScheduledSlotClaims, updateScheduledTaskStore } from "./scheduled-task-store";
+import {
+  acquireScheduledRunLease,
+  claimScheduledSlot,
+  isProcessAlive,
+  loadScheduledTaskStore,
+  pruneScheduledSlotClaims,
+  releaseScheduledRunLease,
+  updateScheduledTaskStore,
+} from "./scheduled-task-store";
 import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "./session-reader";
 import {
   applyScheduledTaskPatch,
@@ -39,6 +47,10 @@ export interface ScheduledTaskRunnerDeps {
   load(): ScheduledTaskStore;
   update<T>(update: (store: ScheduledTaskStore) => T | false): T | false;
   claimSlot(taskId: string, slot: Date): boolean;
+  /** Cross-instance "a run of this task is in flight"; false while another
+   *  live process holds it. */
+  acquireRunLease(taskId: string): boolean;
+  releaseRunLease(taskId: string): void;
   directoryExists(path: string): boolean;
   isProcessAlive(pid: number): boolean;
   /** Spawn a fresh session in `cwd` (no prompt sent). */
@@ -93,9 +105,13 @@ export interface ScheduledTaskRunner {
   create(input: ScheduledTaskInput): ScheduledTask;
   update(id: string, patch: Partial<ScheduledTaskInput>): ScheduledTask;
   remove(id: string): void;
+  /** Throws ScheduledTaskRunningError while a run of the task is in flight
+   *  in this or another omp-web process. */
   runNow(id: string): Promise<ScheduledTaskRun>;
   /** Mark runs whose owning process is gone (or forgot them) as interrupted. */
   reconcileRuns(): void;
+  /** Never throws for run-time problems (they become the record), except a
+   *  manual run of a task already running: ScheduledTaskRunningError. */
   startRun(task: ScheduledTask, trigger: ScheduledTaskRunTrigger, scheduledFor: Date | null): Promise<StartedScheduledRun>;
   isActive(taskId: string): boolean;
 }
@@ -128,8 +144,8 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
 
   /**
    * Start one run. Resolves once the prompt was accepted (or the run was
-   * skipped or failed to start) with the run record; `done` settles when the
-   * turn ends. Never throws for run-time problems: they become the record.
+   * skipped or failed to start) with the run record; `done` settles (never
+   * rejects) when the turn ends.
    */
   async function startRun(task: ScheduledTask, trigger: ScheduledTaskRunTrigger, scheduledFor: Date | null): Promise<StartedScheduledRun> {
     const run: ScheduledTaskRun = {
@@ -144,21 +160,28 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
       error: null,
       pid: process.pid,
     };
-    if (active.has(task.id)) {
+    // The lease covers other omp-web instances on the agent dir; `active`
+    // covers this one (and lets the lease reclaim a lost record of ours).
+    if (active.has(task.id) || !deps.acquireRunLease(task.id)) {
+      if (trigger === "manual") throw new ScheduledTaskRunningError();
       finish(run, "skipped", "The previous run of this task was still running.");
       return { run, done: Promise.resolve(run) };
     }
     active.set(task.id, run.id);
-    saveRun(run);
+    const release = () => {
+      if (active.get(task.id) === run.id) active.delete(task.id);
+      deps.releaseRunLease(task.id);
+    };
 
     let session: ScheduledRunSession | null = null;
     let created = false;
     try {
+      saveRun(run);
       if (!deps.directoryExists(task.cwd)) throw new Error(`Workspace directory does not exist: ${task.cwd}`);
       if (task.sessionMode === "continue" && task.lastSessionId) {
         session = await deps.openSession(task.lastSessionId);
         if (session?.isRunning()) {
-          active.delete(task.id);
+          release();
           run.sessionId = session.sessionId;
           finish(run, "skipped", "The continued session was busy.");
           return { run, done: Promise.resolve(run) };
@@ -174,7 +197,9 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
       run.sessionId = session.sessionId;
       saveRun(run);
       setLastSession(task.id, session.sessionId);
-      // Register before sending so a fast turn cannot end unobserved.
+      // Register before sending so a fast turn cannot end unobserved. If the
+      // prompt below fails, the catch settles the run and nothing awaits this
+      // waiter; its later timeout must not surface as an unhandled rejection.
       const turnEnd = session.waitForTurnEnd(SCHEDULED_RUN_TIMEOUT_MS);
       turnEnd.catch(() => {});
       await session.send({ type: "prompt", message: task.prompt });
@@ -189,17 +214,21 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
           saveRun(run);
           setLastSession(task.id, live.sessionId);
         }
-        return run;
-      }).finally(() => {
-        if (active.get(task.id) === run.id) active.delete(task.id);
-      });
+      }).catch((error: unknown) => {
+        // Nobody awaits `done`; a failed history write must not become an
+        // unhandled rejection (instrumentation exits the server on those).
+        deps.log(`scheduled task ${task.id}: could not record the end of run ${run.id}: ${errorMessage(error)}`);
+      }).then(() => run).finally(release);
       return { run, done };
     } catch (error) {
-      active.delete(task.id);
       // A session spawned for a prompt that never ran would idle as an
       // orphaned child; a continued session belongs to the user and stays.
       if (created && session) await session.destroyAndWait().catch(() => {});
-      finish(run, "failed", errorMessage(error));
+      try {
+        finish(run, "failed", errorMessage(error));
+      } finally {
+        release();
+      }
       deps.log(`scheduled task ${task.id} failed to start: ${run.error}`);
       return { run, done: Promise.resolve(run) };
     }
@@ -295,7 +324,6 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
   async function runNow(id: string): Promise<ScheduledTaskRun> {
     const task = deps.load().tasks.find((entry) => entry.id === id);
     if (!task) throw new ScheduledTaskNotFoundError();
-    if (active.has(id)) throw new ScheduledTaskRunningError();
     return (await startRun(task, "manual", null)).run;
   }
 
@@ -323,15 +351,10 @@ function defaultDeps(): ScheduledTaskRunnerDeps {
     load: loadScheduledTaskStore,
     update: updateScheduledTaskStore,
     claimSlot: claimScheduledSlot,
+    acquireRunLease: acquireScheduledRunLease,
+    releaseRunLease: releaseScheduledRunLease,
     directoryExists: existsSync,
-    isProcessAlive: (pid) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "EPERM";
-      }
-    },
+    isProcessAlive,
     async createSession(cwd) {
       // A unique key: startRpcSession coalesces callers that share one.
       const { session } = await startRpcSession(`__scheduled__${randomUUID()}`, "", cwd, undefined, undefined);

@@ -1493,6 +1493,7 @@
   "scheduledTasks.runStartedOpen": "クリックするとセッションを開きます。",
   "scheduledTasks.alreadyRunning": "{name} はすでに実行中です",
   "scheduledTasks.runFailed": "{name} を開始できませんでした",
+  "scheduledTasks.runSkipped": "{name} はスキップされました",
   "scheduledTasks.toggleFailed": "{name} を更新できませんでした",
   "scheduledTasks.deleteTitle": "スケジュールタスクを削除しますか？",
   "scheduledTasks.deleteBody": "「{name}」は今後実行されません。これまでの実行のセッションはサイドバーに残ります。",

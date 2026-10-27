@@ -1493,6 +1493,7 @@
   "scheduledTasks.runStartedOpen": "点击打开对应会话。",
   "scheduledTasks.alreadyRunning": "{name} 正在运行",
   "scheduledTasks.runFailed": "无法运行 {name}",
+  "scheduledTasks.runSkipped": "已跳过 {name}",
   "scheduledTasks.toggleFailed": "无法更新 {name}",
   "scheduledTasks.deleteTitle": "删除定时任务？",
   "scheduledTasks.deleteBody": "“{name}”将不再运行。之前运行产生的会话仍保留在侧边栏中。",

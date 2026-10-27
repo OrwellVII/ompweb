@@ -5,7 +5,9 @@ import { createElement, StrictMode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
 import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
-const { ScheduledTasksConfig } = await createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } }).import("./ScheduledTasksConfig.tsx");
+const jiti = createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } });
+const { ScheduledTasksConfig } = await jiti.import("./ScheduledTasksConfig.tsx");
+const { ToastProvider } = await jiti.import("./ui/toast.tsx");
 afterEach(cleanup);
 
 const emptyList = { tasks: [], runs: [], timeZone: "Asia/Shanghai", schedulerEnabled: true };
@@ -77,13 +79,15 @@ test("server field errors render next to the field and keep the form open", asyn
   assert.ok(screen.getByRole("button", { name: "Create task" }));
 });
 
+const listedTask = {
+  id: "task-1", name: "Friday report", cwd: "/work/app", prompt: "p",
+  schedule: { kind: "weekly", days: [5], time: "15:30" }, sessionMode: "new", model: null, thinkingLevel: null, enabled: true,
+  createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", anchorAt: "2026-10-01T00:00:00.000Z", lastSlotAt: "2026-10-23T07:30:00.000Z", lastSessionId: "session-1",
+  nextRunAt: "2026-10-30T07:30:00.000Z", running: false,
+};
+
 test("a listed task shows its schedule, last run, and opens the run's session", async (t) => {
-  const task = {
-    id: "task-1", name: "Friday report", cwd: "/work/app", prompt: "p",
-    schedule: { kind: "weekly", days: [5], time: "15:30" }, sessionMode: "new", model: null, thinkingLevel: null, enabled: true,
-    createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", anchorAt: "2026-10-01T00:00:00.000Z", lastSlotAt: "2026-10-23T07:30:00.000Z", lastSessionId: "session-1",
-    nextRunAt: "2026-10-30T07:30:00.000Z", running: false,
-  };
+  const task = listedTask;
   const run = { id: "run-1", taskId: "task-1", trigger: "schedule", scheduledFor: "2026-10-23T07:30:00.000Z", startedAt: "2026-10-23T07:30:01.000Z", finishedAt: null, sessionId: "session-1", status: "failed", error: "Model unavailable" };
   mockApi(t, { list: { ...emptyList, tasks: [task], runs: [run] }, onWrite: () => Response.json({}) });
   const opened = [];
@@ -94,4 +98,16 @@ test("a listed task shows its schedule, last run, and opens the run's session", 
   assert.ok(screen.getByText("Model unavailable"));
   await user.click(screen.getByRole("button", { name: "Open session" }));
   assert.deepEqual(opened, ["session-1"]);
+});
+
+test("Run now reports a run that failed to start instead of announcing it as started", async (t) => {
+  mockApi(t, {
+    list: { ...emptyList, tasks: [listedTask] },
+    onWrite: () => Response.json({ run: { id: "run-2", taskId: "task-1", trigger: "manual", scheduledFor: null, startedAt: "2026-10-27T00:00:00.000Z", finishedAt: "2026-10-27T00:00:00.000Z", sessionId: null, status: "failed", error: "Workspace directory does not exist: /work/app", pid: null } }, { status: 202 }),
+  });
+  const user = userEvent.setup();
+  render(createElement(ToastProvider, null, createElement(ScheduledTasksConfig, { cwd: "/work/app" })));
+  await user.click(await screen.findByRole("button", { name: "Run now" }));
+  assert.ok(await screen.findByText("Could not start Friday report"));
+  assert.equal(screen.queryByText("Started Friday report"), null);
 });

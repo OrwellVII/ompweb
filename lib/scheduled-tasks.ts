@@ -331,15 +331,14 @@ function isRunRecord(value: unknown): value is ScheduledTaskRun {
     && (value.pid === undefined || value.pid === null || (typeof value.pid === "number" && Number.isInteger(value.pid)));
 }
 
-/** Parse the on-disk store; malformed entries are dropped, not fatal. */
+/**
+ * Parse the on-disk store. Malformed task and run entries are dropped; a file
+ * that is not a JSON object throws (SyntaxError), so a damaged store is
+ * reported instead of being read as empty and then overwritten.
+ */
 export function parseScheduledTaskStore(text: string): ScheduledTaskStore {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return emptyScheduledTaskStore();
-  }
-  if (!isRecord(raw)) return emptyScheduledTaskStore();
+  const raw: unknown = JSON.parse(text);
+  if (!isRecord(raw)) throw new SyntaxError("Scheduled task store is not a JSON object");
   const tasks: ScheduledTask[] = [];
   const ids = new Set<string>();
   for (const entry of Array.isArray(raw.tasks) ? raw.tasks : []) {
