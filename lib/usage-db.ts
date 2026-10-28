@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, join } from "path";
 import { readModelsConfig, type ModelsFileConfig } from "./omp/models-config";
 import { getAgentDir, getSessionsDir } from "./omp/paths";
-import { listSessionArtifactTranscripts, listSessionFiles } from "./omp/session-files";
+import { listAllSessionInfos, listSessionArtifactTranscripts, listSessionFiles } from "./omp/session-files";
 import {
   formatChartDateLabel,
   formatFullDateLabel,
@@ -19,6 +19,8 @@ import type {
   ModelUsageSummary,
   ProjectUsageSummary,
   ProviderUsageSummary,
+  SessionModelUsage,
+  SessionUsageSummary,
   TimeSeriesPoint,
   UsageQueryOptions,
   UsageRecord,
@@ -379,6 +381,9 @@ function collectUncountedUsage(db: DatabaseSync): void {
 
 /** Report filter: rows not listed by {@link collectUncountedUsage}. */
 const COUNTED_ROWS = "id NOT IN (SELECT id FROM temp.uncounted_usage)";
+
+/** A conversation without a title is named by its first message, cut to this length. */
+const SESSION_TITLE_MAX_CHARS = 200;
 
 /**
  * Execute SQL analytics queries over the SQLite database to generate a full UsageReport.
@@ -754,6 +759,89 @@ export async function getUsageReportFromDb(
     sessionsCount: row.sessionsCount,
   }));
 
+  // 7. Session (conversation) Breakdown Query. Artifact transcripts already
+  // carry their owning session's id, so subagent and advisor usage lands in
+  // the conversation that spawned it. The bare `session_cwd` columns take the
+  // newest request's value (SQLite's single-max() rule).
+  const sessionRows = db
+    .prepare(
+      `
+      WITH per_model AS (
+        SELECT
+          session_id,
+          provider,
+          model,
+          MAX(timestamp) AS lastActiveAt,
+          session_cwd,
+          COALESCE(SUM(cost), 0) AS cost,
+          COALESCE(SUM(total_tokens), 0) AS tokens,
+          COUNT(*) AS requestsCount
+        FROM usage_records
+        WHERE ${COUNTED_ROWS} AND timestamp >= ? AND timestamp <= ? ${whereProject}
+        GROUP BY session_id, provider, model
+      )
+      SELECT
+        session_id AS sessionId,
+        MAX(lastActiveAt) AS lastActiveAt,
+        session_cwd AS project,
+        SUM(cost) AS cost,
+        SUM(tokens) AS tokens,
+        SUM(requestsCount) AS requestsCount,
+        json_group_array(json_object('model', model, 'provider', provider, 'cost', cost, 'tokens', tokens)) AS models
+      FROM per_model
+      GROUP BY session_id
+      ORDER BY cost DESC, tokens DESC, sessionId ASC
+    `,
+    )
+    .all(...params) as Array<{
+    sessionId: string;
+    lastActiveAt: number;
+    project: string;
+    cost: number;
+    tokens: number;
+    requestsCount: number;
+    models: string;
+  }>;
+
+  // Titles come from the session list; a session missing from it is gone.
+  // The list stands in "(no messages)" for an empty first message.
+  const sessionTitleById = new Map<string, string>();
+  if (sessionRows.length > 0) {
+    for (const info of await listAllSessionInfos(sessionsDir)) {
+      if (sessionTitleById.has(info.id)) continue;
+      const firstMessage = info.firstMessage === "(no messages)" ? "" : info.firstMessage;
+      sessionTitleById.set(
+        info.id,
+        info.title?.trim() || firstMessage.replace(/\s+/g, " ").trim().slice(0, SESSION_TITLE_MAX_CHARS),
+      );
+    }
+  }
+
+  const sessionBreakdown: SessionUsageSummary[] = sessionRows.map((row) => {
+    const title = sessionTitleById.get(row.sessionId);
+    const models = (JSON.parse(row.models) as SessionModelUsage[]).sort(
+      (a, b) => b.cost - a.cost || b.tokens - a.tokens,
+    );
+    return {
+      sessionId: row.sessionId,
+      title: title || row.sessionId,
+      project: row.project || "Default Project",
+      projectName: basename(row.project || "Default Project") || row.project,
+      models,
+      cost: row.cost,
+      tokens: row.tokens,
+      share:
+        totalCost > 0
+          ? (row.cost / totalCost) * 100
+          : totalTokens > 0
+            ? (row.tokens / totalTokens) * 100
+            : 0,
+      requestsCount: row.requestsCount,
+      lastActiveAt: row.lastActiveAt,
+      deleted: title === undefined,
+    };
+  });
+
   // Scan info
   const totalSyncedRow = db.prepare("SELECT COUNT(*) as c FROM synced_files").get() as { c: number };
   const inWindowSyncedRow = db
@@ -780,6 +868,7 @@ export async function getUsageReportFromDb(
     modelBreakdown,
     dayBreakdown,
     projectBreakdown,
+    sessionBreakdown,
     scanInfo: {
       transcriptsScanned,
       transcriptsOutsideWindow,
