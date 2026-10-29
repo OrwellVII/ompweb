@@ -1127,7 +1127,14 @@ export function UsageConfig({ onOpenSession }: {
                         <tr
                           key={s.sessionId}
                           data-session-id={s.sessionId}
-                          onClick={openable ? () => onOpenSession?.(s.sessionId) : undefined}
+                          onClick={openable ? (event) => {
+                            // Releasing a drag that selected text in this row (to copy a title) opens nothing.
+                            const selection = window.getSelection();
+                            const row = event.currentTarget;
+                            if (selection && !selection.isCollapsed
+                              && Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)).some((range) => range.intersectsNode(row))) return;
+                            onOpenSession?.(s.sessionId);
+                          } : undefined}
                           style={{ borderBottom: "1px solid var(--bg-subtle)", cursor: openable ? "pointer" : undefined }}
                         >
                           <td style={{ padding: "6px 4px", maxWidth: 0, width: "100%" }}>

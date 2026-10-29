@@ -12,6 +12,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  window.getSelection()?.removeAllRanges();
 });
 
 const SESSION_COUNT = SESSION_PREVIEW_LIMIT + 5;
@@ -97,6 +98,22 @@ test("the conversation tab lists the most expensive conversations first and open
   // Any cell of the row opens it too.
   fireEvent.click(view.container.querySelector('tr[data-session-id="s3"] td:nth-child(2)'));
   assert.deepEqual(opened, ["s0", "s3"]);
+});
+
+test("releasing a text selection in a row does not open it; a selection elsewhere does not block it", async () => {
+  const opened = [];
+  const { view } = await renderSessionsTab(opened);
+  const row = view.container.querySelector('tr[data-session-id="s3"]');
+
+  // Drag-selecting the title to copy it ends with a click on the row.
+  window.getSelection().selectAllChildren(row.querySelector("button"));
+  fireEvent.click(row.querySelector("td:nth-child(2)"));
+  fireEvent.click(row.querySelector("button"));
+  assert.deepEqual(opened, []);
+
+  window.getSelection().selectAllChildren(view.container.querySelector('tr[data-session-id="s4"] td'));
+  fireEvent.click(row.querySelector("button"));
+  assert.deepEqual(opened, ["s3"], "the title button still opens it");
 });
 
 test("a deleted conversation is labelled and cannot be opened", async () => {
