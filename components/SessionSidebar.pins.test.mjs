@@ -2,7 +2,8 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react/pure.js";
+import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
 // The live-event stream needs a worker; this test drives the list by fetches only.
@@ -55,11 +56,13 @@ test("a failed pin write refetches the list without its ETag so the server's pin
 
   // Unpin here; the write is still in flight when another device unpins the
   // same session and a refresh commits that list (and its new ETag).
+  const user = userEvent.setup();
   const group = document.querySelector(".sidebar-pinned-sessions");
-  fireEvent.click(group.querySelector('button[aria-label="Project actions"]'));
-  await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Unpin" })); });
+  await user.click(within(group).getByRole("button", { name: "Project actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Unpin" }));
   assert.equal(document.querySelector(".sidebar-pinned-sessions"), null, "the unpin shows at once");
   serverPins = [];
+  // The browser reporting the network is back triggers the sidebar's refresh.
   await act(async () => { window.dispatchEvent(new window.Event("online")); });
   await waitFor(() => assert.equal(listRequests.length, 2));
 
