@@ -16,6 +16,14 @@ export const SCHEDULED_TASK_LIMITS = {
   maxRunsPerTask: 20,
 } as const;
 
+/** Upper bound for one run; the session keeps running past it, only the
+ *  run record stops waiting and is marked failed. */
+export const SCHEDULED_RUN_TIMEOUT_MS = 6 * 60 * 60_000;
+/** Longest a run holds its lease and stays "running": the turn timeout plus
+ *  time to start the session and write the final record. Past it, the run's
+ *  owner is gone even if a process with its pid exists (a reused pid). */
+export const SCHEDULED_RUN_MAX_MS = SCHEDULED_RUN_TIMEOUT_MS + 10 * 60_000;
+
 export type ScheduleWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday, as Date#getDay
 
 export type TaskSchedule =

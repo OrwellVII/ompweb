@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "crypto";
 import { closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { getAgentDir } from "./omp/paths";
-import { emptyScheduledTaskStore, parseScheduledTaskStore, type ParsedScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-tasks";
+import { emptyScheduledTaskStore, parseScheduledTaskStore, SCHEDULED_RUN_MAX_MS, type ParsedScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-tasks";
 
 // Scheduled tasks on disk: ~/.omp/agent/omp-web/scheduled-tasks.json, shared by
 // every browser and by every omp-web instance on the agent dir (an installed
@@ -12,9 +12,11 @@ import { emptyScheduledTaskStore, parseScheduledTaskStore, type ParsedScheduledT
 // parsed fails loudly and is never overwritten; a write that would drop
 // malformed entries first keeps the file as `scheduled-tasks.json.dropped-<ms>`.
 //
-// Coordination between instances uses owner files that hold the owner's pid
-// and a token unique to that acquisition; a file whose owner process is gone
-// is reclaimed, never one that is merely old:
+// Coordination between instances uses owner files that hold the owner's pid,
+// a token unique to that acquisition and the time the hold expires. A file is
+// reclaimed once its owner process is gone or its hold has expired, never
+// sooner. A hold never outlasts the longest legitimate one, so a pid reused by
+// an unrelated process (after a crash or a reboot) cannot keep a file forever:
 // - the store lock (`scheduled-tasks.json.lock`), held for one update;
 // - a run lease per task (`scheduled-task-leases/<task>`), held while a run of
 //   that task is in flight, so runs of one task never overlap across instances;
@@ -23,6 +25,11 @@ import { emptyScheduledTaskStore, parseScheduledTaskStore, type ParsedScheduledT
 
 const LOCK_TIMEOUT_MS = 3_000;
 const LOCK_RETRY_MS = 20;
+/** Store lock and reclaim markers: held for one synchronous update. */
+const LOCK_HOLD_MS = 60_000;
+/** Clock skew tolerated in an expiry beyond the longest hold; a later expiry
+ *  is not a real one and counts as expired. */
+const EXPIRY_SKEW_MS = 5 * 60_000;
 
 function ompWebDir(): string {
   return resolve(getAgentDir(), "omp-web");
@@ -57,6 +64,9 @@ function sleepSync(ms: number): void {
 interface OwnerFile {
   /** null when the content is not an owner token (treated as a dead owner). */
   pid: number | null;
+  /** When the hold ends (ms since epoch); null in a file written before holds
+   *  expired, whose owner is then judged by its pid alone. */
+  expiresAt: number | null;
   /** The whole token: unique per acquisition, so it identifies this file. */
   content: string;
 }
@@ -70,21 +80,35 @@ function readOwner(path: string): OwnerFile | undefined {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  const pid = Number(content.trim().split(/\s+/, 1)[0]);
-  return { pid: Number.isInteger(pid) && pid > 0 ? pid : null, content };
+  const [pidField, , expiresField] = content.trim().split(/\s+/);
+  const pid = Number(pidField);
+  const expiresAt = expiresField === undefined ? null : Number(expiresField);
+  return {
+    pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+    // An expiry that is present but not a number holds nothing.
+    expiresAt: expiresAt === null || Number.isFinite(expiresAt) ? expiresAt : 0,
+    content,
+  };
+}
+
+/** True while the owner's hold has not expired; a hold may last at most
+ *  `holdMs` (plus clock skew) from now. */
+function holdActive(owner: OwnerFile, holdMs: number, now = Date.now()): boolean {
+  if (owner.expiresAt === null) return true;
+  return owner.expiresAt > now && owner.expiresAt <= now + holdMs + EXPIRY_SKEW_MS;
 }
 
 /**
- * Create `path` holding "<pid> <token>" in one step: the content goes to a
- * private temp file that is hard-linked into place (link never replaces an
- * existing file). The owner file therefore never exists empty or half
- * written, and a failed write leaves nothing at `path`. False when `path`
- * already exists.
+ * Create `path` holding "<pid> <token> <expiresAt>" in one step: the content
+ * goes to a private temp file that is hard-linked into place (link never
+ * replaces an existing file). The owner file therefore never exists empty or
+ * half written, and a failed write leaves nothing at `path`. False when
+ * `path` already exists.
  */
-function createOwnerFile(path: string): boolean {
+function createOwnerFile(path: string, holdMs: number): boolean {
   const temp = `${path}.${process.pid}-${randomUUID()}.tmp`;
   try {
-    writeFileSync(temp, `${process.pid} ${randomUUID()}\n`, { flag: "wx" });
+    writeFileSync(temp, `${process.pid} ${randomUUID()} ${Date.now() + holdMs}\n`, { flag: "wx" });
     try {
       linkSync(temp, path);
       return true;
@@ -102,6 +126,9 @@ function createOwnerFile(path: string): boolean {
 }
 
 export interface OwnFileOptions {
+  /** Longest the caller holds the file; after that it is reclaimed even
+   *  while a process with the owner's pid exists. Default: one store update. */
+  holdMs?: number;
   /** A file this process already owns counts as acquired (a run lease whose
    *  run record was lost). */
   reclaimOwn?: boolean;
@@ -111,17 +138,20 @@ export interface OwnFileOptions {
 
 /**
  * Create `path` as this process's owner file. An existing file whose owner
- * is dead is taken over. Returns false while a live owner holds it, or
- * another live process is reclaiming it.
+ * is dead or whose hold expired is taken over. Returns false while a live
+ * owner holds it, or another live process is reclaiming it.
  */
 export function tryOwnFile(path: string, options: OwnFileOptions = {}): boolean {
+  const holdMs = options.holdMs ?? LOCK_HOLD_MS;
   mkdirSync(dirname(path), { recursive: true });
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (createOwnerFile(path)) return true;
+    if (createOwnerFile(path, holdMs)) return true;
     const owner = readOwner(path);
     if (owner === undefined) continue; // released in between
-    if (owner.pid === process.pid) return options.reclaimOwn === true;
-    if (owner.pid !== null && isProcessAlive(owner.pid)) return false;
+    if (holdActive(owner, holdMs)) {
+      // Our own file is taken over afresh, so the new hold gets a full term.
+      if (owner.pid === process.pid ? options.reclaimOwn !== true : owner.pid !== null && isProcessAlive(owner.pid)) return false;
+    }
     options.beforeReclaim?.();
     if (!removeDeadOwner(path, owner.content)) return false;
   }
@@ -129,16 +159,18 @@ export function tryOwnFile(path: string, options: OwnFileOptions = {}): boolean 
 }
 
 /**
- * Remove `path` only if it still holds `content`, a dead owner's token.
+ * Remove `path` only if it still holds `content`, a dead or expired owner's
+ * token.
  *
  * Reading the token and removing the file cannot be one atomic step, so the
  * removal of each token is serialized instead: only the process that owns
  * `<path>.reclaim-<token hash>` may remove the file holding that token. A
- * token is unique to one acquisition and its owner is dead, so while the
- * marker is held nothing else removes or replaces that file; a reclaimer that
- * finds a different token (a newer owner took over) leaves it alone. The
- * marker is itself an owner file, so one left by a reclaimer that died is
- * reclaimed the same way. Returns false while another live process holds it.
+ * token is unique to one acquisition and its owner no longer holds it, so
+ * while the marker is held nothing else removes or replaces that file; a
+ * reclaimer that finds a different token (a newer owner took over) leaves it
+ * alone. The marker is itself an owner file, so one left by a reclaimer that
+ * died is reclaimed the same way. Returns false while another live process
+ * holds it.
  */
 function removeDeadOwner(path: string, content: string): boolean {
   const marker = `${path}.reclaim-${createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
@@ -233,9 +265,9 @@ export function updateScheduledTaskStore<T>(update: (store: ScheduledTaskStore) 
 }
 
 /** Take the task's run lease; false while another live process runs it. A
- *  lease left by this process (its run record was lost) is reclaimed. */
+ *  lease left by this process (its run record was lost) is taken over. */
 export function acquireScheduledRunLease(taskId: string): boolean {
-  return tryOwnFile(leasePath(taskId), { reclaimOwn: true });
+  return tryOwnFile(leasePath(taskId), { holdMs: SCHEDULED_RUN_MAX_MS, reclaimOwn: true });
 }
 
 export function releaseScheduledRunLease(taskId: string): void {

@@ -248,24 +248,31 @@ hooks/
   Completion is `waitForTurnEnd` (registered before the prompt) with a 6 h
   cap; a timeout only stops waiting, the session keeps going.
 - Several instances may share the agent dir (an installed service plus
-  `npm run dev`). Lock and lease owner files hold "<pid> <token>", written to a
-  temp file and hard-linked into place (never empty, never replaced); a file
-  whose owner process is gone is reclaimed, never one that is merely old. Only
+  `npm run dev`). Lock and lease owner files hold "<pid> <token> <expiresAt>",
+  written to a temp file and hard-linked into place (never empty, never
+  replaced); a file is reclaimed once its owner process is gone or its hold
+  expired, never sooner. A hold never outlasts the longest legitimate one (the
+  store lock 60 s, a run lease the 6 h turn cap plus 10 min), so a pid reused
+  after a crash or reboot cannot keep a file forever; a file without the
+  expiry is judged by its pid alone. Only
   the holder of `<file>.reclaim-<token hash>` (itself an owner file) may remove
-  a dead owner's file, and only while it still holds that token, so two
+  a stale owner's file, and only while it still holds that token, so two
   reclaimers cannot both take it or delete a newer owner's file:
   - each slot fires only in the instance that creates its claim
-    `omp-web/scheduled-task-claims/<task>@<slotMs>` (kept; pruned after 30 d);
-    the others just advance the watermark. A tick whose watermark write fails
-    gives its own claim back so the next tick fires the slot;
+    `omp-web/scheduled-task-claims/<task>@<slotMs>` (kept; pruned after 30 d),
+    and only that instance advances the watermark: a loser that wrote it
+    first would leave the winner finding the slot taken, so it fired nowhere.
+    A tick whose watermark write fails gives its claim back so the next tick
+    fires the slot;
   - a run lease `omp-web/scheduled-task-leases/<task>` is held while a run of
     that task is in flight in any instance, so a scheduled run is `skipped`
     and **Run now** is 409 there too; a run's final record is written (with
     retries) before its lease is released;
   - every store read-modify-write runs under `scheduled-tasks.json.lock` and
     re-reads inside it.
-  Running runs carry the owner `pid`; one whose owner died (or that its own
-  process forgot) is shown `interrupted`. `OMP_WEB_DISABLE_SCHEDULER=1` stops
+  Running runs carry the owner `pid`; one whose owner died, that its own
+  process forgot, or that started longer ago than the longest run (a reused
+  pid) is shown `interrupted`. `OMP_WEB_DISABLE_SCHEDULER=1` stops
   an instance from firing slots; editing and **Run now** still work there.
 - A store file that cannot be read or parsed is an error (the list route
   returns 500 with the path), never an empty store that the next write would

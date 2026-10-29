@@ -19,6 +19,8 @@ import {
   createScheduledTask,
   dueScheduleSlot,
   nextScheduledRun,
+  SCHEDULED_RUN_MAX_MS,
+  SCHEDULED_RUN_TIMEOUT_MS,
   SCHEDULED_TASK_LIMITS,
   withScheduledTaskRun,
   type ScheduledTask,
@@ -88,10 +90,6 @@ export class ScheduledTaskRunningError extends Error {
     super("This task is already running");
   }
 }
-
-/** Upper bound for one run; the session keeps running past it, only the
- *  run record stops waiting and is marked failed. */
-export const SCHEDULED_RUN_TIMEOUT_MS = 6 * 60 * 60_000;
 
 /** Attempts at writing a run's final record before its lease is released;
  *  a record left "running" would read as interrupted once the lease is gone. */
@@ -265,8 +263,11 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
     for (const task of deps.load().tasks) {
       const due = dueScheduleSlot(task, now);
       if (!due) continue;
-      const claimed = deps.claimSlot(task.id, due.slot);
-      // Advance the watermark whether or not this instance won the claim.
+      // Only the instance that claimed the slot touches the task. Were a
+      // loser to advance the watermark first, the winner would find the slot
+      // already taken and fire it nowhere. A loser that ticks again before
+      // the winner's write just fails the claim again.
+      if (!deps.claimSlot(task.id, due.slot)) continue;
       let current: ScheduledTask | false;
       try {
         current = deps.update((store) => {
@@ -276,35 +277,36 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
           return entry;
         });
       } catch (error) {
-        // The slot stays due; give our claim back so the next tick fires it
-        // instead of finding the claim and skipping the slot for good. A
-        // claim this tick did not make (another instance's) is left alone.
-        if (claimed) {
-          try {
-            deps.releaseSlot(task.id, due.slot);
-          } catch (releaseError) {
-            deps.log(`scheduled task ${task.id}: could not release the claim on slot ${due.slot.toISOString()}: ${errorMessage(releaseError)}`);
-          }
+        // The slot stays due; give the claim back so the next tick fires it
+        // instead of finding the claim and skipping the slot for good.
+        try {
+          deps.releaseSlot(task.id, due.slot);
+        } catch (releaseError) {
+          deps.log(`scheduled task ${task.id}: could not release the claim on slot ${due.slot.toISOString()}: ${errorMessage(releaseError)}`);
         }
         throw error;
       }
-      if (!claimed || current === false) continue;
+      if (current === false) continue;
       deps.log(`running scheduled task ${task.id} (${due.trigger}, slot ${due.slot.toISOString()})`);
       started.push((await startRun(current, due.trigger, due.slot)).run);
     }
     return started;
   }
 
-  /** Mark runs whose owning process is gone (or forgot them) as interrupted. */
+  /** Mark runs whose owning process is gone (or forgot them) as interrupted.
+   *  A run older than the longest one is gone even if its pid was reused. */
   function reconcileRuns(): void {
     deps.update((store) => {
       let changed = false;
+      const now = deps.now();
       for (const run of store.runs) {
         if (run.status !== "running") continue;
         const orphaned = run.pid === null
-          || (run.pid === process.pid ? active.get(run.taskId) !== run.id : !deps.isProcessAlive(run.pid));
+          || (run.pid === process.pid
+            ? active.get(run.taskId) !== run.id
+            : !deps.isProcessAlive(run.pid) || now.getTime() - new Date(run.startedAt).getTime() > SCHEDULED_RUN_MAX_MS);
         if (!orphaned) continue;
-        Object.assign(run, { status: "interrupted", finishedAt: run.finishedAt ?? deps.now().toISOString(), pid: null });
+        Object.assign(run, { status: "interrupted", finishedAt: run.finishedAt ?? now.toISOString(), pid: null });
         changed = true;
       }
       return changed;
