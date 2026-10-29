@@ -1,5 +1,6 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
-import { join, resolve } from "path";
+import { createHash, randomUUID } from "crypto";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
 import { getAgentDir } from "./omp/paths";
 import { emptyScheduledTaskStore, parseScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-tasks";
 
@@ -10,19 +11,17 @@ import { emptyScheduledTaskStore, parseScheduledTaskStore, type ScheduledTaskSto
 // instances never lose each other's updates. A store that cannot be read or
 // parsed fails loudly and is never overwritten.
 //
-// Coordination between instances uses owner files created with O_EXCL that
-// hold the owner's pid; a file whose owner process is gone is reclaimed, never
-// one that is merely old:
+// Coordination between instances uses owner files that hold the owner's pid
+// and a token unique to that acquisition; a file whose owner process is gone
+// is reclaimed, never one that is merely old:
 // - the store lock (`scheduled-tasks.json.lock`), held for one update;
 // - a run lease per task (`scheduled-task-leases/<task>`), held while a run of
 //   that task is in flight, so runs of one task never overlap across instances;
-// - a claim per schedule slot (`scheduled-task-claims/<task>@<slotMs>`), kept,
-//   so a slot fires in exactly one instance.
+// - a claim per schedule slot (`scheduled-task-claims/<task>@<slotMs>`, an
+//   empty O_EXCL file), kept, so a slot fires in exactly one instance.
 
 const LOCK_TIMEOUT_MS = 3_000;
 const LOCK_RETRY_MS = 20;
-/** An owner file still empty after this long lost its writer mid-create. */
-const UNWRITTEN_OWNER_STALE_MS = 10_000;
 
 function ompWebDir(): string {
   return resolve(getAgentDir(), "omp-web");
@@ -54,59 +53,107 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Pid recorded in an owner file; null while unwritten, undefined when gone. */
-function readOwner(path: string): number | null | undefined {
+interface OwnerFile {
+  /** null when the content is not an owner token (treated as a dead owner). */
+  pid: number | null;
+  /** The whole token: unique per acquisition, so it identifies this file. */
+  content: string;
+}
+
+/** The owner file at `path`, or undefined when there is none. */
+function readOwner(path: string): OwnerFile | undefined {
+  let content: string;
   try {
-    const text = readFileSync(path, "utf8").trim();
-    const pid = Number(text);
-    return text && Number.isInteger(pid) && pid > 0 ? pid : null;
+    content = readFileSync(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
+  const pid = Number(content.trim().split(/\s+/, 1)[0]);
+  return { pid: Number.isInteger(pid) && pid > 0 ? pid : null, content };
 }
 
 /**
- * Create `path` exclusively with this process's pid. An existing file whose
- * owner is dead (or, with `reclaimOwn`, is this process) is taken over.
- * Returns false while a live owner holds it.
+ * Create `path` holding "<pid> <token>" in one step: the content goes to a
+ * private temp file that is hard-linked into place (link never replaces an
+ * existing file). The owner file therefore never exists empty or half
+ * written, and a failed write leaves nothing at `path`. False when `path`
+ * already exists.
  */
-function tryOwn(path: string, reclaimOwn = false): boolean {
-  mkdirSync(resolve(path, ".."), { recursive: true });
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+function createOwnerFile(path: string): boolean {
+  const temp = `${path}.${process.pid}-${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, `${process.pid} ${randomUUID()}\n`, { flag: "wx" });
     try {
-      const fd = openSync(path, "wx");
-      try {
-        writeSync(fd, String(process.pid));
-      } finally {
-        closeSync(fd);
-      }
+      linkSync(temp, path);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
     }
+  } finally {
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // A leftover private temp file blocks nothing.
+    }
+  }
+}
+
+export interface OwnFileOptions {
+  /** A file this process already owns counts as acquired (a run lease whose
+   *  run record was lost). */
+  reclaimOwn?: boolean;
+  /** Test seam: runs after a dead owner was read, before it is reclaimed. */
+  beforeReclaim?: () => void;
+}
+
+/**
+ * Create `path` as this process's owner file. An existing file whose owner
+ * is dead is taken over. Returns false while a live owner holds it, or
+ * another live process is reclaiming it.
+ */
+export function tryOwnFile(path: string, options: OwnFileOptions = {}): boolean {
+  mkdirSync(dirname(path), { recursive: true });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (createOwnerFile(path)) return true;
     const owner = readOwner(path);
     if (owner === undefined) continue; // released in between
-    if (owner === process.pid && reclaimOwn) return true;
-    if (owner !== null && owner !== process.pid && isProcessAlive(owner)) return false;
-    if (owner === null) {
-      // Created but not written yet: give the writer time unless it is long gone.
-      try {
-        if (Date.now() - statSync(path).mtimeMs < UNWRITTEN_OWNER_STALE_MS) return false;
-      } catch {
-        continue;
-      }
-    }
-    if (owner === process.pid) return false; // held by this process
-    rmSync(path, { force: true }); // dead owner
+    if (owner.pid === process.pid) return options.reclaimOwn === true;
+    if (owner.pid !== null && isProcessAlive(owner.pid)) return false;
+    options.beforeReclaim?.();
+    if (!removeDeadOwner(path, owner.content)) return false;
   }
   return false;
+}
+
+/**
+ * Remove `path` only if it still holds `content`, a dead owner's token.
+ *
+ * Reading the token and removing the file cannot be one atomic step, so the
+ * removal of each token is serialized instead: only the process that owns
+ * `<path>.reclaim-<token hash>` may remove the file holding that token. A
+ * token is unique to one acquisition and its owner is dead, so while the
+ * marker is held nothing else removes or replaces that file; a reclaimer that
+ * finds a different token (a newer owner took over) leaves it alone. The
+ * marker is itself an owner file, so one left by a reclaimer that died is
+ * reclaimed the same way. Returns false while another live process holds it.
+ */
+function removeDeadOwner(path: string, content: string): boolean {
+  const marker = `${path}.reclaim-${createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
+  if (!tryOwnFile(marker)) return false;
+  try {
+    if (readOwner(path)?.content === content) rmSync(path, { force: true });
+  } finally {
+    release(marker);
+  }
+  return true;
 }
 
 /** Remove `path` if this process owns it. */
 function release(path: string): void {
   try {
-    if (readOwner(path) === process.pid) rmSync(path, { force: true });
+    if (readOwner(path)?.pid === process.pid) rmSync(path, { force: true });
   } catch {
     // Already gone, or unreadable: nothing of ours to remove.
   }
@@ -154,7 +201,7 @@ function saveScheduledTaskStore(store: ScheduledTaskStore): void {
 export function updateScheduledTaskStore<T>(update: (store: ScheduledTaskStore) => T | false): T | false {
   const lockPath = `${storePath()}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  while (!tryOwn(lockPath)) {
+  while (!tryOwnFile(lockPath)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${lockPath} (another omp-web process holds it)`);
     sleepSync(LOCK_RETRY_MS);
   }
@@ -171,24 +218,32 @@ export function updateScheduledTaskStore<T>(update: (store: ScheduledTaskStore) 
 /** Take the task's run lease; false while another live process runs it. A
  *  lease left by this process (its run record was lost) is reclaimed. */
 export function acquireScheduledRunLease(taskId: string): boolean {
-  return tryOwn(leasePath(taskId), true);
+  return tryOwnFile(leasePath(taskId), { reclaimOwn: true });
 }
 
 export function releaseScheduledRunLease(taskId: string): void {
   release(leasePath(taskId));
 }
 
+function slotClaimPath(taskId: string, slot: Date): string {
+  return join(claimsDir(), `${encodeURIComponent(taskId)}@${slot.getTime()}`);
+}
+
 /** True when this process is the first to claim the slot. */
 export function claimScheduledSlot(taskId: string, slot: Date): boolean {
   mkdirSync(claimsDir(), { recursive: true });
-  const name = `${encodeURIComponent(taskId)}@${slot.getTime()}`;
   try {
-    closeSync(openSync(join(claimsDir(), name), "wx"));
+    closeSync(openSync(slotClaimPath(taskId, slot), "wx"));
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
   }
+}
+
+/** Give back a slot claim (only one this process made); a missing claim is fine. */
+export function releaseScheduledSlot(taskId: string, slot: Date): void {
+  rmSync(slotClaimPath(taskId, slot), { force: true });
 }
 
 /** Remove claim files older than `maxAgeMs`; best effort. */

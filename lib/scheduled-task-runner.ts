@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { setTimeout as sleep } from "timers/promises";
 import { allowFileRoot } from "./file-access";
 import { getRpcSession, resolveSpawnCwdResult, startRpcSession } from "./rpc-manager";
 import {
@@ -9,6 +10,7 @@ import {
   loadScheduledTaskStore,
   pruneScheduledSlotClaims,
   releaseScheduledRunLease,
+  releaseScheduledSlot,
   updateScheduledTaskStore,
 } from "./scheduled-task-store";
 import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "./session-reader";
@@ -47,6 +49,8 @@ export interface ScheduledTaskRunnerDeps {
   load(): ScheduledTaskStore;
   update<T>(update: (store: ScheduledTaskStore) => T | false): T | false;
   claimSlot(taskId: string, slot: Date): boolean;
+  /** Give back a claim this process made. */
+  releaseSlot(taskId: string, slot: Date): void;
   /** Cross-instance "a run of this task is in flight"; false while another
    *  live process holds it. */
   acquireRunLease(taskId: string): boolean;
@@ -60,6 +64,8 @@ export interface ScheduledTaskRunnerDeps {
   /** Format a run time for the session name, in the server's local time. */
   formatSessionTime(date: Date): string;
   log(message: string): void;
+  /** Wait before retrying a failed write. */
+  delay(ms: number): Promise<void>;
 }
 
 export class ScheduledTaskNotFoundError extends Error {
@@ -86,6 +92,11 @@ export class ScheduledTaskRunningError extends Error {
 /** Upper bound for one run; the session keeps running past it, only the
  *  run record stops waiting and is marked failed. */
 export const SCHEDULED_RUN_TIMEOUT_MS = 6 * 60 * 60_000;
+
+/** Attempts at writing a run's final record before its lease is released;
+ *  a record left "running" would read as interrupted once the lease is gone. */
+const FINAL_RECORD_ATTEMPTS = 3;
+const FINAL_RECORD_RETRY_MS = 1_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -140,6 +151,19 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
   const finish = (run: ScheduledTaskRun, status: ScheduledTaskRun["status"], error: string | null) => {
     Object.assign(run, { status, error, finishedAt: deps.now().toISOString(), pid: null });
     saveRun(run);
+  };
+
+  /** `finish` for a run that ended, retried a few times; throws the last error. */
+  const finishEnded = async (run: ScheduledTaskRun, status: ScheduledTaskRun["status"], error: string | null) => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        finish(run, status, error);
+        return;
+      } catch (saveError) {
+        if (attempt >= FINAL_RECORD_ATTEMPTS) throw saveError;
+        await deps.delay(FINAL_RECORD_RETRY_MS);
+      }
+    }
   };
 
   /**
@@ -205,15 +229,15 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
       await session.send({ type: "prompt", message: task.prompt });
       const live = session;
       const done = turnEnd.then(
-        () => finish(run, "completed", null),
-        (error: unknown) => finish(run, "failed", errorMessage(error)),
-      ).then(() => {
+        () => ({ status: "completed" as const, error: null }),
+        (error: unknown) => ({ status: "failed" as const, error: errorMessage(error) }),
+      ).then(async (outcome) => {
         // A non-owner write moves the session to a new id; follow it.
-        if (live.sessionId && live.sessionId !== run.sessionId) {
-          run.sessionId = live.sessionId;
-          saveRun(run);
-          setLastSession(task.id, live.sessionId);
-        }
+        const movedTo = live.sessionId && live.sessionId !== run.sessionId ? live.sessionId : null;
+        if (movedTo) run.sessionId = movedTo;
+        // Still under the lease, so a retried write cannot race a new run.
+        await finishEnded(run, outcome.status, outcome.error);
+        if (movedTo) setLastSession(task.id, movedTo);
       }).catch((error: unknown) => {
         // Nobody awaits `done`; a failed history write must not become an
         // unhandled rejection (instrumentation exits the server on those).
@@ -243,12 +267,27 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
       if (!due) continue;
       const claimed = deps.claimSlot(task.id, due.slot);
       // Advance the watermark whether or not this instance won the claim.
-      const current = deps.update((store) => {
-        const entry = store.tasks.find((candidate) => candidate.id === task.id);
-        if (!entry || new Date(entry.lastSlotAt).getTime() >= due.slot.getTime()) return false;
-        entry.lastSlotAt = due.slot.toISOString();
-        return entry;
-      });
+      let current: ScheduledTask | false;
+      try {
+        current = deps.update((store) => {
+          const entry = store.tasks.find((candidate) => candidate.id === task.id);
+          if (!entry || new Date(entry.lastSlotAt).getTime() >= due.slot.getTime()) return false;
+          entry.lastSlotAt = due.slot.toISOString();
+          return entry;
+        });
+      } catch (error) {
+        // The slot stays due; give our claim back so the next tick fires it
+        // instead of finding the claim and skipping the slot for good. A
+        // claim this tick did not make (another instance's) is left alone.
+        if (claimed) {
+          try {
+            deps.releaseSlot(task.id, due.slot);
+          } catch (releaseError) {
+            deps.log(`scheduled task ${task.id}: could not release the claim on slot ${due.slot.toISOString()}: ${errorMessage(releaseError)}`);
+          }
+        }
+        throw error;
+      }
       if (!claimed || current === false) continue;
       deps.log(`running scheduled task ${task.id} (${due.trigger}, slot ${due.slot.toISOString()})`);
       started.push((await startRun(current, due.trigger, due.slot)).run);
@@ -351,6 +390,7 @@ function defaultDeps(): ScheduledTaskRunnerDeps {
     load: loadScheduledTaskStore,
     update: updateScheduledTaskStore,
     claimSlot: claimScheduledSlot,
+    releaseSlot: releaseScheduledSlot,
     acquireRunLease: acquireScheduledRunLease,
     releaseRunLease: releaseScheduledRunLease,
     directoryExists: existsSync,
@@ -376,6 +416,7 @@ function defaultDeps(): ScheduledTaskRunnerDeps {
       return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
     },
     log: (message) => console.log(`[omp-web] ${message}`),
+    delay: (ms) => sleep(ms),
   };
 }
 
@@ -390,8 +431,6 @@ export function getScheduledTaskRunner(): ScheduledTaskRunner {
 export async function startScheduledTaskScheduler(): Promise<void> {
   if (!isSchedulerEnabled() || globalThis.__ompScheduledTaskTimer) return;
   const runner = getScheduledTaskRunner();
-  pruneScheduledSlotClaims(new Date());
-  runner.reconcileRuns();
   let ticking = false;
   const tick = async () => {
     if (ticking) return;
@@ -404,7 +443,16 @@ export async function startScheduledTaskScheduler(): Promise<void> {
       ticking = false;
     }
   };
+  // The timer goes in before any store access: the list reports an enabled
+  // scheduler as running, so a store that cannot be read at boot must only
+  // fail ticks until it is fixed, not leave this instance off for good.
   globalThis.__ompScheduledTaskTimer = setInterval(() => void tick(), TICK_MS);
   globalThis.__ompScheduledTaskTimer.unref?.();
+  pruneScheduledSlotClaims(new Date());
+  try {
+    runner.reconcileRuns();
+  } catch (error) {
+    console.warn(`[omp-web] scheduled task run reconciliation failed: ${errorMessage(error)}`);
+  }
   await tick();
 }

@@ -286,11 +286,14 @@ export function nextScheduledRun(task: ScheduledTask, now: Date): Date | null {
   return nextScheduleSlot(task.schedule, new Date(task.anchorAt), watermark);
 }
 
-/** Add a run, keeping the newest `maxRunsPerTask` per task (newest first). */
+/** Add a run, keeping the newest `maxRunsPerTask` finished runs per task
+ *  (newest first). Running records are always kept: dropping one would show
+ *  the task idle while its run is still in flight. */
 export function withScheduledTaskRun(runs: readonly ScheduledTaskRun[], run: ScheduledTaskRun): ScheduledTaskRun[] {
   const next = [run, ...runs.filter((entry) => entry.id !== run.id)];
   const perTask = new Map<string, number>();
   return next.filter((entry) => {
+    if (entry.status === "running") return true;
     const count = (perTask.get(entry.taskId) ?? 0) + 1;
     perTask.set(entry.taskId, count);
     return count <= SCHEDULED_TASK_LIMITS.maxRunsPerTask;

@@ -248,15 +248,20 @@ hooks/
   Completion is `waitForTurnEnd` (registered before the prompt) with a 6 h
   cap; a timeout only stops waiting, the session keeps going.
 - Several instances may share the agent dir (an installed service plus
-  `npm run dev`). Coordination uses owner files created with `O_EXCL` that
-  hold the owner's pid; a file whose owner process is gone is reclaimed,
-  never one that is merely old:
+  `npm run dev`). Lock and lease owner files hold "<pid> <token>", written to a
+  temp file and hard-linked into place (never empty, never replaced); a file
+  whose owner process is gone is reclaimed, never one that is merely old. Only
+  the holder of `<file>.reclaim-<token hash>` (itself an owner file) may remove
+  a dead owner's file, and only while it still holds that token, so two
+  reclaimers cannot both take it or delete a newer owner's file:
   - each slot fires only in the instance that creates its claim
     `omp-web/scheduled-task-claims/<task>@<slotMs>` (kept; pruned after 30 d);
-    the others just advance the watermark;
+    the others just advance the watermark. A tick whose watermark write fails
+    gives its own claim back so the next tick fires the slot;
   - a run lease `omp-web/scheduled-task-leases/<task>` is held while a run of
     that task is in flight in any instance, so a scheduled run is `skipped`
-    and **Run now** is 409 there too;
+    and **Run now** is 409 there too; a run's final record is written (with
+    retries) before its lease is released;
   - every store read-modify-write runs under `scheduled-tasks.json.lock` and
     re-reads inside it.
   Running runs carry the owner `pid`; one whose owner died (or that its own
