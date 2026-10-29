@@ -1045,7 +1045,7 @@ export function invalidateAllSessionScanCaches(): void {
 
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
  * returned info as immutable — cache hits share one object. */
-function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
+export function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
   let stat: { size: number; mtime: Date; mtimeMs: number };
   try {
     stat = statSync(filePath);
@@ -1087,7 +1087,8 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
  * requests (sidebar poll, page loads) into a single stat. Per-file scanning is
  * still memoized by scanSessionInfoCached on (size, mtimeMs).
  */
-export async function listAllSessionInfos(sessionsRoot = getSessionsDir()): Promise<OmpSessionInfo[]> {
+export async function listAllSessionInfos(): Promise<OmpSessionInfo[]> {
+  const sessionsRoot = getSessionsDir();
   const files = await listSessionFiles(sessionsRoot);
 
   const sessions: OmpSessionInfo[] = [];

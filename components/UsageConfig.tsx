@@ -1106,11 +1106,18 @@ export function UsageConfig({ onOpenSession }: {
                     </tr>
                   ) : (
                     visibleSessions.map((s) => {
-                      const openable = !s.deleted && Boolean(onOpenSession);
+                      const openable = !s.deleted && !s.tooLarge && Boolean(onOpenSession);
+                      // Why a listed conversation cannot be opened, if it cannot.
+                      const unavailable = s.deleted
+                        ? { label: t("usageConfig.deletedSession"), hint: t("usageConfig.deletedSessionHint") }
+                        : s.tooLarge
+                          ? { label: t("usageConfig.tooLargeSession"), hint: t("errors.session_file_too_large") }
+                          : undefined;
                       const mainModel = s.models[0]?.model ?? "";
                       const modelsLabel = s.models.length > 1 ? `${mainModel} +${s.models.length - 1}` : mainModel;
                       const modelsTitle = s.models.map((m) => `${m.model}: ${formatCurrency(m.cost)}`).join("\n");
                       const lastActive = new Date(s.lastActiveAt).toLocaleString(locale, {
+                        year: "numeric",
                         month: "short",
                         day: "numeric",
                         hour: "2-digit",
@@ -1120,14 +1127,15 @@ export function UsageConfig({ onOpenSession }: {
                         <tr
                           key={s.sessionId}
                           data-session-id={s.sessionId}
-                          style={{ borderBottom: "1px solid var(--bg-subtle)" }}
+                          onClick={openable ? () => onOpenSession?.(s.sessionId) : undefined}
+                          style={{ borderBottom: "1px solid var(--bg-subtle)", cursor: openable ? "pointer" : undefined }}
                         >
                           <td style={{ padding: "6px 4px", maxWidth: 0, width: "100%" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                               {openable ? (
+                                // The keyboard target; its click bubbles to the row, which opens the conversation.
                                 <button
                                   type="button"
-                                  onClick={() => onOpenSession?.(s.sessionId)}
                                   title={t("usageConfig.openSession", { title: s.title })}
                                   style={{
                                     padding: 0,
@@ -1148,9 +1156,9 @@ export function UsageConfig({ onOpenSession }: {
                                 </button>
                               ) : (
                                 <span
-                                  title={s.deleted ? t("usageConfig.deletedSessionHint") : s.title}
+                                  title={unavailable?.hint ?? s.title}
                                   style={{
-                                    color: s.deleted ? "var(--text-muted)" : "var(--text)",
+                                    color: unavailable ? "var(--text-muted)" : "var(--text)",
                                     fontWeight: 500,
                                     minWidth: 0,
                                     overflow: "hidden",
@@ -1161,7 +1169,7 @@ export function UsageConfig({ onOpenSession }: {
                                   {s.title}
                                 </span>
                               )}
-                              {s.deleted && (
+                              {unavailable && (
                                 <span
                                   style={{
                                     flexShrink: 0,
@@ -1172,7 +1180,7 @@ export function UsageConfig({ onOpenSession }: {
                                     color: "var(--text-dim)",
                                   }}
                                 >
-                                  {t("usageConfig.deletedSession")}
+                                  {unavailable.label}
                                 </span>
                               )}
                             </div>

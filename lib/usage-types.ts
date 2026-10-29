@@ -145,6 +145,8 @@ export interface SessionUsageSummary {
   lastActiveAt: number; // ms timestamp of the newest request in the window
   /** The session is no longer in the session list (deleted), so it cannot be opened. */
   deleted: boolean;
+  /** The session file is past omp-web's load ceiling (MAX_SESSION_LOAD_BYTES), so it cannot be opened here. */
+  tooLarge: boolean;
 }
 
 export interface UsageReportScanInfo {

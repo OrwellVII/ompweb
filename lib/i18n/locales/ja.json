@@ -1655,6 +1655,7 @@
   "usageConfig.openSession": "セッションを開く: {title}",
   "usageConfig.deletedSession": "削除済み",
   "usageConfig.deletedSessionHint": "このセッションは削除されているため開けません。",
+  "usageConfig.tooLargeSession": "大きすぎます",
   "usageConfig.showAllSessions": "全 {count} 件のセッションを表示",
   "usageConfig.showTopSessions": "上位 {count} 件のみ表示",
   "usageConfig.share": "割合",

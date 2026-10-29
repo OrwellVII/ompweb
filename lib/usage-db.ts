@@ -3,7 +3,12 @@ import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, join } from "path";
 import { readModelsConfig, type ModelsFileConfig } from "./omp/models-config";
 import { getAgentDir, getSessionsDir } from "./omp/paths";
-import { listAllSessionInfos, listSessionArtifactTranscripts, listSessionFiles } from "./omp/session-files";
+import {
+  listSessionArtifactTranscripts,
+  listSessionFiles,
+  MAX_SESSION_LOAD_BYTES,
+  scanSessionInfoCached,
+} from "./omp/session-files";
 import {
   formatChartDateLabel,
   formatFullDateLabel,
@@ -386,6 +391,19 @@ const COUNTED_ROWS = "id NOT IN (SELECT id FROM temp.uncounted_usage)";
 const SESSION_TITLE_MAX_CHARS = 200;
 
 /**
+ * The session file a synced transcript belongs to: the transcript itself, or
+ * for a helper transcript the `<session>.jsonl` beside the artifacts directory
+ * it sits in (see listSessionArtifactTranscripts).
+ */
+function owningSessionFile(filePath: string, sessionFiles: ReadonlySet<string>): string | undefined {
+  if (sessionFiles.has(filePath)) return filePath;
+  for (let dir = dirname(filePath); dir !== dirname(dir); dir = dirname(dir)) {
+    if (sessionFiles.has(`${dir}.jsonl`)) return `${dir}.jsonl`;
+  }
+  return undefined;
+}
+
+/**
  * Execute SQL analytics queries over the SQLite database to generate a full UsageReport.
  */
 export async function getUsageReportFromDb(
@@ -761,8 +779,8 @@ export async function getUsageReportFromDb(
 
   // 7. Session (conversation) Breakdown Query. Artifact transcripts already
   // carry their owning session's id, so subagent and advisor usage lands in
-  // the conversation that spawned it. The bare `session_cwd` columns take the
-  // newest request's value (SQLite's single-max() rule).
+  // the conversation that spawned it. The bare `session_cwd` and `file_path`
+  // columns take the newest request's values (SQLite's single-max() rule).
   const sessionRows = db
     .prepare(
       `
@@ -773,6 +791,7 @@ export async function getUsageReportFromDb(
           model,
           MAX(timestamp) AS lastActiveAt,
           session_cwd,
+          file_path AS filePath,
           COALESCE(SUM(cost), 0) AS cost,
           COALESCE(SUM(total_tokens), 0) AS tokens,
           COUNT(*) AS requestsCount
@@ -784,6 +803,7 @@ export async function getUsageReportFromDb(
         session_id AS sessionId,
         MAX(lastActiveAt) AS lastActiveAt,
         session_cwd AS project,
+        filePath,
         SUM(cost) AS cost,
         SUM(tokens) AS tokens,
         SUM(requestsCount) AS requestsCount,
@@ -797,28 +817,24 @@ export async function getUsageReportFromDb(
     sessionId: string;
     lastActiveAt: number;
     project: string;
+    filePath: string;
     cost: number;
     tokens: number;
     requestsCount: number;
     models: string;
   }>;
 
-  // Titles come from the session list; a session missing from it is gone.
-  // The list stands in "(no messages)" for an empty first message.
-  const sessionTitleById = new Map<string, string>();
-  if (sessionRows.length > 0) {
-    for (const info of await listAllSessionInfos(sessionsDir)) {
-      if (sessionTitleById.has(info.id)) continue;
-      const firstMessage = info.firstMessage === "(no messages)" ? "" : info.firstMessage;
-      sessionTitleById.set(
-        info.id,
-        info.title?.trim() || firstMessage.replace(/\s+/g, " ").trim().slice(0, SESSION_TITLE_MAX_CHARS),
-      );
-    }
-  }
-
+  // Titles and sizes come from each listed conversation's own session file,
+  // found through a transcript its usage was read from; only those files are
+  // scanned. A conversation whose file is no longer listed is gone.
+  const listedSessionFiles = new Set(sessionFiles);
   const sessionBreakdown: SessionUsageSummary[] = sessionRows.map((row) => {
-    const title = sessionTitleById.get(row.sessionId);
+    const sessionFile = owningSessionFile(row.filePath, listedSessionFiles);
+    const info = sessionFile ? scanSessionInfoCached(sessionFile) : undefined;
+    // The list stands in "(no messages)" for an empty first message.
+    const firstMessage = !info || info.firstMessage === "(no messages)" ? "" : info.firstMessage;
+    const title =
+      info?.title?.trim() || firstMessage.replace(/\s+/g, " ").trim().slice(0, SESSION_TITLE_MAX_CHARS);
     const models = (JSON.parse(row.models) as SessionModelUsage[]).sort(
       (a, b) => b.cost - a.cost || b.tokens - a.tokens,
     );
@@ -838,7 +854,8 @@ export async function getUsageReportFromDb(
             : 0,
       requestsCount: row.requestsCount,
       lastActiveAt: row.lastActiveAt,
-      deleted: title === undefined,
+      deleted: info === undefined,
+      tooLarge: info !== undefined && info.size > MAX_SESSION_LOAD_BYTES,
     };
   });
 

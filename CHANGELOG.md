@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
-- **See what each conversation cost.** Settings → Usage → Breakdown has a **Conversation** tab next to Model / Day / Project: one row per conversation for the selected time range, with its title, project, the models it used, cost, share, tokens, request count and last activity, most expensive first. Subagent and advisor usage counts toward the conversation that started it. The top 50 are listed, with **Show all** for the rest. Clicking a row opens the conversation; one that has since been deleted is labelled and cannot be opened.
+- **See what each conversation cost.** Settings → Usage → Breakdown has a **Conversation** tab next to Model / Day / Project: one row per conversation for the selected time range, with its title, project, the models it used, cost, share, tokens, request count and last activity, most expensive first. Subagent and advisor usage counts toward the conversation that started it. The top 50 are listed, with **Show all** for the rest. Clicking a row opens the conversation; one that has since been deleted, or is too large for omp-web to open, is labelled and cannot be opened.
 
 ### Fixes & Improvements
 

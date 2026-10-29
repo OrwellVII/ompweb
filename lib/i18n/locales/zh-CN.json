@@ -1655,6 +1655,7 @@
   "usageConfig.openSession": "打开会话：{title}",
   "usageConfig.deletedSession": "已删除",
   "usageConfig.deletedSessionHint": "该会话已删除，无法再打开。",
+  "usageConfig.tooLargeSession": "过大",
   "usageConfig.showAllSessions": "显示全部 {count} 个会话",
   "usageConfig.showTopSessions": "仅显示前 {count} 个",
   "usageConfig.share": "占比",

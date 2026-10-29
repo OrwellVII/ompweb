@@ -1696,6 +1696,7 @@
   "usageConfig.openSession": "Open conversation: {title}",
   "usageConfig.deletedSession": "Deleted",
   "usageConfig.deletedSessionHint": "This conversation has been deleted and can no longer be opened.",
+  "usageConfig.tooLargeSession": "Too large",
   "usageConfig.showAllSessions": "Show all {count} conversations",
   "usageConfig.showTopSessions": "Show top {count} only",
   "usageConfig.share": "Share",

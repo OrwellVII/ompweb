@@ -16,7 +16,7 @@ afterEach(() => {
 
 const SESSION_COUNT = SESSION_PREVIEW_LIMIT + 5;
 
-/** Conversations as the server sends them: most expensive first. `s1` is deleted. */
+/** Conversations as the server sends them: most expensive first. `s1` is deleted, `s2` is too large to open. */
 function sessionBreakdown() {
   return Array.from({ length: SESSION_COUNT }, (_, i) => ({
     sessionId: `s${i}`,
@@ -35,6 +35,7 @@ function sessionBreakdown() {
     requestsCount: 3,
     lastActiveAt: Date.UTC(2026, 9, 27, 12, 0),
     deleted: i === 1,
+    tooLarge: i === 2,
   }));
 }
 
@@ -84,13 +85,18 @@ test("the conversation tab lists the most expensive conversations first and open
   const costs = [...view.container.querySelectorAll("tr[data-session-id] td:nth-child(2)")].map((td) => td.textContent);
   assert.deepEqual(costs.slice(0, 3), ["$100.00", "$54.00", "$53.00"]);
 
-  // The row shows its project, main model (+ the others) and request count.
+  // The row shows its project, main model (+ the others), last activity with its year, and request count.
   const first = view.container.querySelector('tr[data-session-id="s0"]');
   assert.match(first.textContent, /project-0 · claude-opus-5-5 \+1 · /);
+  assert.match(first.querySelector("td:nth-child(1)").textContent, /2026/);
   assert.equal(first.querySelector("td:nth-child(5)").textContent, "3");
 
   fireEvent.click(view.getByRole("button", { name: "Session 0" }));
-  assert.deepEqual(opened, ["s0"]);
+  assert.deepEqual(opened, ["s0"], "the title button opens it once");
+
+  // Any cell of the row opens it too.
+  fireEvent.click(view.container.querySelector('tr[data-session-id="s3"] td:nth-child(2)'));
+  assert.deepEqual(opened, ["s0", "s3"]);
 });
 
 test("a deleted conversation is labelled and cannot be opened", async () => {
@@ -101,6 +107,20 @@ test("a deleted conversation is labelled and cannot be opened", async () => {
   assert.equal(deleted.querySelector("button"), null);
   assert.match(deleted.textContent, /Deleted/);
   fireEvent.click(view.getByText("Session 1"));
+  fireEvent.click(deleted.querySelector("td:nth-child(2)"));
+  assert.deepEqual(opened, []);
+});
+
+test("a conversation too large to load is labelled and cannot be opened", async () => {
+  const opened = [];
+  const { view } = await renderSessionsTab(opened);
+
+  const tooLarge = view.container.querySelector('tr[data-session-id="s2"]');
+  assert.equal(tooLarge.querySelector("button"), null);
+  assert.match(tooLarge.textContent, /Too large/);
+  assert.match(view.getByText("Session 2").getAttribute("title"), /too large to open/);
+  fireEvent.click(view.getByText("Session 2"));
+  fireEvent.click(tooLarge.querySelector("td:nth-child(2)"));
   assert.deepEqual(opened, []);
 });
 
