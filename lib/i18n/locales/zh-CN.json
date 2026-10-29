@@ -1509,6 +1509,7 @@
   "scheduledTasks.form.workspaceHint": "每次运行都在此目录中启动。",
   "scheduledTasks.form.workspaceOther": "其他路径…",
   "scheduledTasks.form.workspacePath": "工作区路径",
+  "scheduledTasks.form.workspacePathPlaceholder": "/path/to/project",
   "scheduledTasks.form.prompt": "提示词",
   "scheduledTasks.form.promptPlaceholder": "每次运行时 omp 要做什么",
   "scheduledTasks.form.schedule": "计划",

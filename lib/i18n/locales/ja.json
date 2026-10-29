@@ -1509,6 +1509,7 @@
   "scheduledTasks.form.workspaceHint": "各実行はこのディレクトリで開始します。",
   "scheduledTasks.form.workspaceOther": "その他のパス…",
   "scheduledTasks.form.workspacePath": "ワークスペースのパス",
+  "scheduledTasks.form.workspacePathPlaceholder": "/path/to/project",
   "scheduledTasks.form.prompt": "プロンプト",
   "scheduledTasks.form.promptPlaceholder": "毎回の実行で omp にしてほしいこと",
   "scheduledTasks.form.schedule": "スケジュール",

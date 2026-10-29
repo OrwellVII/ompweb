@@ -1550,6 +1550,7 @@
   "scheduledTasks.form.workspaceHint": "Each run starts in this directory.",
   "scheduledTasks.form.workspaceOther": "Other path…",
   "scheduledTasks.form.workspacePath": "Workspace path",
+  "scheduledTasks.form.workspacePathPlaceholder": "/path/to/project",
   "scheduledTasks.form.prompt": "Prompt",
   "scheduledTasks.form.promptPlaceholder": "What omp should do on every run",
   "scheduledTasks.form.schedule": "Schedule",

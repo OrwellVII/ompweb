@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { CalendarClock, ChevronDown, ChevronRight, ExternalLink, Loader2, Pencil, Play, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Alert, Check, ConfirmDialog, Field, NumInput, TextInput } from "@/components/ui/field";
+import { Collapsible, CollapsibleTrigger } from "@/components/ui/primitives";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
@@ -319,11 +320,11 @@ export function ScheduledTasksConfig({ cwd, onOpenSession }: { cwd: string | nul
           {sessionLink(lastSessionId)}
         </div>
         {lastRun?.error ? <RunError error={lastRun.error} /> : null}
-        <div>
-          <button type="button" className="ui-focus-ring" aria-expanded={isExpanded} aria-controls={recentId} onClick={() => toggleExpanded(task.id)} style={{ ...linkButtonStyle, color: "var(--text-muted)" }}>
+        <Collapsible open={isExpanded} onOpenChange={() => toggleExpanded(task.id)}>
+          <CollapsibleTrigger type="button" className="ui-focus-ring" aria-controls={isExpanded ? recentId : undefined} style={{ ...linkButtonStyle, color: "var(--text-muted)" }}>
             {isExpanded ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
             {t("scheduledTasks.recentRuns", { count: runs.length })}
-          </button>
+          </CollapsibleTrigger>
           {isExpanded ? (
             <div id={recentId} style={{ marginTop: 6, display: "flex", flexDirection: "column", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", overflow: "hidden" }}>
               {runs.length === 0 ? (
@@ -341,7 +342,7 @@ export function ScheduledTasksConfig({ cwd, onOpenSession }: { cwd: string | nul
               ))}
             </div>
           ) : null}
-        </div>
+        </Collapsible>
       </div>
     );
   };
@@ -548,7 +549,7 @@ function TaskEditor({ task, defaultCwd, projects, models, timeZone, onCancel, on
         return;
       }
       if (body?.code === "invalid_scheduled_task" && body.fields && Object.keys(body.fields).length > 0) {
-        setErrors(body.fields);
+        setErrors(localizeErrors(body.fields));
       } else if (body?.code === "directory_not_found") {
         setErrors({ cwd: formatApiError(body) });
       } else {
@@ -588,7 +589,7 @@ function TaskEditor({ task, defaultCwd, projects, models, timeZone, onCancel, on
       </Field>
       {cwdChoice === CUSTOM_WORKSPACE ? (
         <Field label={t("scheduledTasks.form.workspacePath")} error={errors.cwd}>
-          <TextInput value={customCwd} onChange={setCustomCwd} placeholder="/path/to/project" mono spellCheck={false} autoComplete="off" error={errors.cwd} />
+          <TextInput value={customCwd} onChange={setCustomCwd} placeholder={t("scheduledTasks.form.workspacePathPlaceholder")} mono spellCheck={false} autoComplete="off" error={errors.cwd} />
         </Field>
       ) : null}
       <Field label={t("scheduledTasks.form.prompt")} error={errors.prompt} required>

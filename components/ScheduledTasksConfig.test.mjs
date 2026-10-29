@@ -2,7 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createElement, StrictMode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
+import { cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
 import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } });
@@ -34,7 +34,9 @@ async function fillWeeklyTask(user) {
   await user.type(screen.getByLabelText(/^Prompt/), "Summarize this week's merged changes");
   await user.selectOptions(screen.getByLabelText("Repeat"), "weekly");
   await user.click(screen.getByRole("checkbox", { name: "Fri" }));
-  fireEvent.change(screen.getByLabelText("Time"), { target: { value: "15:30" } });
+  const time = screen.getByLabelText("Time");
+  await user.clear(time);
+  await user.type(time, "15:30");
   await user.click(screen.getByRole("radio", { name: /Continue the same session/ }));
   await user.selectOptions(screen.getByLabelText("Thinking level"), "high");
 }
@@ -74,7 +76,7 @@ test("server field errors render next to the field and keep the form open", asyn
   render(createElement(ScheduledTasksConfig, { cwd: "/work/app" }));
   await fillWeeklyTask(user);
   await user.click(screen.getByRole("button", { name: "Create task" }));
-  const error = await screen.findByText("Prompt is limited to 20000 characters");
+  const error = await screen.findByText("Enter a prompt of up to 20000 characters.");
   assert.equal(error.getAttribute("role"), "alert");
   assert.ok(screen.getByRole("button", { name: "Create task" }));
 });
