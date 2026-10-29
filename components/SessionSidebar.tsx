@@ -1125,11 +1125,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
     } catch {
-      // A failed write leaves the server ETag unchanged, so a refresh would 304
-      // and keep the optimistic list: undo this toggle here, keeping any other
-      // toggle made meanwhile and a failed unpin's old place in the group.
+      // Undo this toggle at once (keeping any other toggle made meanwhile and a
+      // failed unpin's old place), then let the server decide: another device
+      // may have changed the same pin, and a refresh committed since then would
+      // answer 304 to a conditional request, so this one goes without the ETag.
       commitPinnedSessionIds(restoreSessionPin(pinnedSessionIdsRef.current, before, session.id));
       toast.error(t("sessionSidebar.pinFailed"));
+      sessionsEtagRef.current = null;
+      void loadSessions();
       return;
     }
     void loadSessions();

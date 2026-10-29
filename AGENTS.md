@@ -571,7 +571,9 @@ during the wait.
   session row menu; the toggle is optimistic and reverts on failure (a failed
   write leaves the server ETag unchanged, so a refresh alone would not). The
   revert (`restoreSessionPin`) undoes only that session, back in its old place,
-  and reads the list from a ref mirrored on every write, never from a state updater.
+  and reads the list from a ref mirrored on every write, never from a state
+  updater. The failed toggle then refetches the list without `If-None-Match`,
+  so the server's pins win if another device changed the same pin meanwhile.
 
 ### Clone a repository as a new workspace (`/api/projects/clone`)
 - The Add-workspace `DirectoryPicker` takes an optional Git URL; "Clone here"
