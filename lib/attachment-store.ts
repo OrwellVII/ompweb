@@ -30,6 +30,10 @@ const MAX_SEGMENT_BYTES = 255;
 const BATCH_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const WINDOWS_RESERVED_CHARACTERS = /[<>:"|?*]/;
+// Device names Windows reserves in every directory, with or without an
+// extension ("NUL.txt" is still NUL); matched against the part before the
+// first dot. Superscript digits are reserved too; COM0/LPT0 are not.
+const WINDOWS_RESERVED_NAMES = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/i;
 
 export class AttachmentError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {
@@ -63,6 +67,7 @@ export interface AttachmentChunk {
 
 declare global {
   var __ompAttachmentsPrunedAt: number | undefined;
+  var __ompAttachmentBatchLocks: Map<string, Promise<void>> | undefined;
 }
 
 export function getAttachmentsDir(): string {
@@ -70,8 +75,24 @@ export function getAttachmentsDir(): string {
 }
 
 // Windows and default macOS volumes address `A.txt` and `a.txt` as one
-// filesystem object, so the path dedupe there folds case.
+// filesystem object, so the path dedupe there folds case. APFS also treats
+// the NFC and NFD spellings of a name as one file; NTFS and ext4 do not.
 const CASE_INSENSITIVE_FILESYSTEM = process.platform === "win32" || process.platform === "darwin";
+const NORMALIZATION_INSENSITIVE_FILESYSTEM = process.platform === "darwin";
+
+interface PathKeyOptions {
+  caseInsensitive?: boolean;
+  normalizationInsensitive?: boolean;
+}
+
+/** The form two paths share when this filesystem addresses them as one object. */
+function attachmentPathKey(
+  value: string,
+  { caseInsensitive = CASE_INSENSITIVE_FILESYSTEM, normalizationInsensitive = NORMALIZATION_INSENSITIVE_FILESYSTEM }: PathKeyOptions = {},
+): string {
+  const folded = caseInsensitive ? value.toLocaleLowerCase() : value;
+  return normalizationInsensitive ? folded.normalize("NFC") : folded;
+}
 
 /** Error for one browser-supplied relative path ("dir/sub/file.pdf"), or null. */
 export function validateAttachmentPath(relativePath: unknown, platform: NodeJS.Platform = process.platform): string | null {
@@ -84,33 +105,38 @@ export function validateAttachmentPath(relativePath: unknown, platform: NodeJS.P
     if (segment === "") return `Path has an empty segment: ${relativePath}`;
     if (segment === "." || segment === "..") return `Path must not contain "${segment}": ${relativePath}`;
     if (Buffer.byteLength(segment, "utf8") > MAX_SEGMENT_BYTES) return `Path segment is too long: ${relativePath}`;
-    if (platform === "win32" && (WINDOWS_RESERVED_CHARACTERS.test(segment) || /[. ]$/.test(segment))) {
+    if (platform === "win32" && (
+      WINDOWS_RESERVED_CHARACTERS.test(segment)
+      || /[. ]$/.test(segment)
+      || WINDOWS_RESERVED_NAMES.test(segment.split(".", 1)[0].trimEnd())
+    )) {
       return `Path is not valid on this server: ${relativePath}`;
     }
   }
   return null;
 }
 
-/** Every path valid, none duplicated, and none both a file and a folder. */
+/** Every path valid, none duplicated, and none both a file and a folder.
+ *  Duplicates follow the filesystem: folded case and Unicode normalization
+ *  where it addresses those spellings as one object. */
 export function validateAttachmentPaths(
   paths: readonly unknown[],
-  { caseInsensitive = CASE_INSENSITIVE_FILESYSTEM, platform = process.platform }: { caseInsensitive?: boolean; platform?: NodeJS.Platform } = {},
+  { platform = process.platform, ...keyOptions }: PathKeyOptions & { platform?: NodeJS.Platform } = {},
 ): string | null {
   if (paths.length === 0) return "No files selected";
-  const key = (value: string) => (caseInsensitive ? value.toLocaleLowerCase() : value);
   const files = new Map<string, string>();
   const folders = new Map<string, string>();
   for (const candidate of paths) {
     const error = validateAttachmentPath(candidate, platform);
     if (error) return error;
     const relativePath = candidate as string;
-    const fileKey = key(relativePath);
+    const fileKey = attachmentPathKey(relativePath, keyOptions);
     if (files.has(fileKey)) return `Duplicate path in upload: ${relativePath}`;
     files.set(fileKey, relativePath);
     const segments = relativePath.split("/");
     for (let end = 1; end < segments.length; end += 1) {
       const folder = segments.slice(0, end).join("/");
-      folders.set(key(folder), folder);
+      folders.set(attachmentPathKey(folder, keyOptions), folder);
     }
   }
   for (const [fileKey, relativePath] of files) {
@@ -130,6 +156,11 @@ export function parseAttachmentBatchRequest(body: unknown): AttachmentBatchReque
   if (kind !== "file" && kind !== "folder") throw badRequest('kind must be "file" or "folder"');
   if (typeof name !== "string" || name.includes("/") || validateAttachmentPath(name)) {
     throw badRequest(`Invalid attachment name: ${typeof name === "string" ? name || "(empty)" : "(missing)"}`);
+  }
+  // A file batch is `<batch>/<name>` and a folder batch lives under it, so the
+  // root name is the only path that could land on the batch's manifest.
+  if (attachmentPathKey(name) === attachmentPathKey(MANIFEST_NAME)) {
+    throw badRequest(`Name is reserved for attachment metadata: ${name}`, "invalid_attachment_path");
   }
   if (!Array.isArray(files) || files.length === 0) throw badRequest("files must be a non-empty array");
   if (files.length > MAX_ATTACHMENT_BATCH_FILES) {
@@ -170,7 +201,8 @@ function batchDirectory(batchId: string): string {
 
 async function writeManifest(directory: string, manifest: AttachmentManifest): Promise<void> {
   const target = path.join(directory, MANIFEST_NAME);
-  const temporary = `${target}.${process.pid}.tmp`;
+  // Unique per call: overlapping writers in one process must not share a file.
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   await fsp.writeFile(temporary, JSON.stringify(manifest), { mode: 0o600 });
   await fsp.rename(temporary, target);
 }
@@ -218,56 +250,83 @@ export async function createAttachmentBatch(
   return { batchId };
 }
 
+/** Run `task` after every earlier chunk write or completion of this batch
+ *  has settled, so overlapping requests (a direct API caller; the composer
+ *  sends in order) cannot both pass the offset check for the same bytes. */
+async function withBatchLock<T>(batchId: string, task: () => Promise<T>): Promise<T> {
+  const locks = (globalThis.__ompAttachmentBatchLocks ??= new Map());
+  const previous = locks.get(batchId) ?? Promise.resolve();
+  const { promise: settled, resolve: release } = Promise.withResolvers<void>();
+  const tail = previous.then(() => settled);
+  locks.set(batchId, tail);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (locks.get(batchId) === tail) locks.delete(batchId);
+  }
+}
+
 /** Append chunks in order. Each chunk must start where its file currently
  *  ends, so a retried or reordered request is refused instead of corrupting. */
 export async function writeAttachmentChunks(batchId: string, chunks: readonly AttachmentChunk[]): Promise<void> {
-  const { directory, manifest } = await readManifest(batchId);
-  if (manifest.completed) throw new AttachmentError("Attachment upload is already complete", 409, "attachment_completed");
-  const declared = new Map(manifest.files.map((file) => [file.path, file.size]));
-  for (const chunk of chunks) {
-    const size = declared.get(chunk.path);
-    if (size === undefined) throw badRequest(`Path was not declared for this attachment: ${chunk.path}`, "attachment_unknown_path");
-    if (!Number.isSafeInteger(chunk.offset) || chunk.offset < 0) throw badRequest("Chunk offset must be a non-negative integer");
-    if (chunk.offset + chunk.data.byteLength > size) {
-      throw badRequest(`Chunk runs past the declared size of ${chunk.path}`, "attachment_chunk_overflow");
+  await withBatchLock(batchId, async () => {
+    const { directory, manifest } = await readManifest(batchId);
+    if (manifest.completed) throw new AttachmentError("Attachment upload is already complete", 409, "attachment_completed");
+    const declared = new Map(manifest.files.map((file) => [file.path, file.size]));
+    for (const chunk of chunks) {
+      const size = declared.get(chunk.path);
+      if (size === undefined) throw badRequest(`Path was not declared for this attachment: ${chunk.path}`, "attachment_unknown_path");
+      if (!Number.isSafeInteger(chunk.offset) || chunk.offset < 0) throw badRequest("Chunk offset must be a non-negative integer");
+      if (chunk.offset + chunk.data.byteLength > size) {
+        throw badRequest(`Chunk runs past the declared size of ${chunk.path}`, "attachment_chunk_overflow");
+      }
+      const target = path.join(directory, chunk.path);
+      const stat = await fsp.lstat(target);
+      if (!stat.isFile()) throw new AttachmentError(`Not a regular file: ${chunk.path}`, 409, "attachment_not_file");
+      if (stat.size !== chunk.offset) {
+        throw new AttachmentError(
+          `Chunk for ${chunk.path} starts at ${chunk.offset}, expected ${stat.size}`,
+          409,
+          "attachment_offset_mismatch",
+        );
+      }
+      const handle = await fsp.open(target, "r+");
+      try {
+        // A positional write may write fewer bytes than asked; finish the chunk.
+        for (let written = 0; written < chunk.data.byteLength;) {
+          const { bytesWritten } = await handle.write(chunk.data, written, chunk.data.byteLength - written, chunk.offset + written);
+          if (bytesWritten === 0) throw new AttachmentError(`Write made no progress for ${chunk.path}`, 500, "attachment_write_failed");
+          written += bytesWritten;
+        }
+      } finally {
+        await handle.close();
+      }
     }
-    const target = path.join(directory, chunk.path);
-    const stat = await fsp.lstat(target);
-    if (!stat.isFile()) throw new AttachmentError(`Not a regular file: ${chunk.path}`, 409, "attachment_not_file");
-    if (stat.size !== chunk.offset) {
-      throw new AttachmentError(
-        `Chunk for ${chunk.path} starts at ${chunk.offset}, expected ${stat.size}`,
-        409,
-        "attachment_offset_mismatch",
-      );
-    }
-    const handle = await fsp.open(target, "r+");
-    try {
-      await handle.write(chunk.data, 0, chunk.data.byteLength, chunk.offset);
-    } finally {
-      await handle.close();
-    }
-  }
+  });
 }
 
 /** Confirm every declared byte arrived and return what the composer shows. */
 export async function completeAttachmentBatch(batchId: string): Promise<AttachmentReferenceData> {
-  const { directory, manifest } = await readManifest(batchId);
-  for (const file of manifest.files) {
-    const stat = await fsp.lstat(path.join(directory, file.path));
-    if (!stat.isFile() || stat.size !== file.size) {
-      throw new AttachmentError(`Upload incomplete: ${file.path}`, 409, "attachment_incomplete");
+  return withBatchLock(batchId, async () => {
+    const { directory, manifest } = await readManifest(batchId);
+    for (const file of manifest.files) {
+      const stat = await fsp.lstat(path.join(directory, file.path));
+      if (!stat.isFile() || stat.size !== file.size) {
+        throw new AttachmentError(`Upload incomplete: ${file.path}`, 409, "attachment_incomplete");
+      }
     }
-  }
-  if (!manifest.completed) await writeManifest(directory, { ...manifest, completed: true });
-  return {
-    batchId,
-    kind: manifest.kind,
-    name: manifest.name,
-    path: path.join(directory, manifest.name),
-    size: manifest.totalBytes,
-    fileCount: manifest.files.length,
-  };
+    if (!manifest.completed) await writeManifest(directory, { ...manifest, completed: true });
+    return {
+      batchId,
+      kind: manifest.kind,
+      name: manifest.name,
+      path: path.join(directory, manifest.name),
+      size: manifest.totalBytes,
+      fileCount: manifest.files.length,
+    };
+  });
 }
 
 async function batchCreatedAt(directory: string): Promise<number> {
