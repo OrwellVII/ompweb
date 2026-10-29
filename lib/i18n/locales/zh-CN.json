@@ -370,6 +370,8 @@
   "chatInput.attachmentPreparing": "准备中…",
   "chatInput.attachmentUploadsPending": "附件仍在上传，完成后再发送。",
   "chatInput.attachmentUploadFailed": "无法上传 {name}：{error}",
+  "chatInput.attachmentUploadHttpStatus": "服务器返回 HTTP {status}",
+  "chatInput.attachmentUploadBadResponse": "服务器返回了无法识别的响应",
   "chatInput.attachmentTooManyFiles": "未附加 {name}：单个附件最多包含 {count} 个文件。",
   "chatInput.attachmentTooLarge": "未附加 {name}：单个附件最大 {size}。",
   "chatInput.attachmentFolderEmpty": "未附加 {name}：文件夹中没有文件。",

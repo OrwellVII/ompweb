@@ -36,8 +36,15 @@ export interface FolderAttachmentSource {
   entries: (limit: number) => Promise<AttachmentUploadEntry[]>;
 }
 
+/** `serverError` is the route's own reason when it sent one; otherwise the UI
+ *  shows a localized reason from `status` (undefined: malformed success body). */
 export class AttachmentUploadError extends Error {
-  constructor(message: string, readonly code: string | undefined, readonly status: number) {
+  constructor(
+    message: string,
+    readonly code: string | undefined,
+    readonly status: number | undefined,
+    readonly serverError?: string,
+  ) {
     super(message);
   }
 }
@@ -84,10 +91,12 @@ async function requestJson(fetchImpl: typeof fetch, url: string, init: RequestIn
   }
   if (!response.ok) {
     const payload = (body ?? {}) as { error?: unknown; code?: unknown };
+    const serverError = typeof payload.error === "string" ? payload.error : undefined;
     throw new AttachmentUploadError(
-      typeof payload.error === "string" ? payload.error : `Upload failed (HTTP ${response.status})`,
+      serverError ?? `Upload failed (HTTP ${response.status})`,
       typeof payload.code === "string" ? payload.code : undefined,
       response.status,
+      serverError,
     );
   }
   return body;
@@ -102,7 +111,7 @@ export async function uploadAttachment(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ kind, name, files: entries.map((entry) => ({ path: entry.path, size: entry.file.size })) }),
   }) as { batchId?: unknown };
-  if (typeof created?.batchId !== "string") throw new AttachmentUploadError("Upload failed: no batch id", undefined, 500);
+  if (typeof created?.batchId !== "string") throw new AttachmentUploadError("Upload failed: no batch id", undefined, undefined);
   const batchUrl = `/api/attachments/${encodeURIComponent(created.batchId)}`;
   let uploaded = 0;
   for (const parts of planAttachmentChunks(entries)) {
@@ -117,7 +126,7 @@ export async function uploadAttachment(
     onProgress?.(uploaded);
   }
   const reference = await requestJson(fetchImpl, batchUrl, { method: "POST" });
-  if (!isAttachmentReferenceData(reference)) throw new AttachmentUploadError("Upload failed: malformed response", undefined, 500);
+  if (!isAttachmentReferenceData(reference)) throw new AttachmentUploadError("Upload failed: malformed response", undefined, undefined);
   return reference;
 }
 

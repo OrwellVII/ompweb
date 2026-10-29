@@ -714,10 +714,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setAttachedReferences((prev) => [...prev, reference]);
     } catch (error) {
       if (attachmentRevisionRef.current !== revision) return;
-      const code = error instanceof AttachmentUploadError ? error.code : undefined;
-      setAttachError(limitMessage(code) ?? t("chatInput.attachmentUploadFailed", {
+      if (!(error instanceof AttachmentUploadError)) {
+        setAttachError(t("chatInput.attachmentUploadFailed", { name, error: error instanceof Error ? error.message : String(error) }));
+        return;
+      }
+      setAttachError(limitMessage(error.code) ?? t("chatInput.attachmentUploadFailed", {
         name,
-        error: error instanceof Error ? error.message : String(error),
+        error: error.serverError ?? (error.status === undefined
+          ? t("chatInput.attachmentUploadBadResponse")
+          : t("chatInput.attachmentUploadHttpStatus", { status: error.status })),
       }));
     } finally {
       pendingReferenceRevisionsRef.current.delete(id);

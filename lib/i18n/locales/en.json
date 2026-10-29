@@ -387,6 +387,8 @@
   "chatInput.attachmentPreparing": "Preparing…",
   "chatInput.attachmentUploadsPending": "Attachments are still uploading. Send again once they finish.",
   "chatInput.attachmentUploadFailed": "Could not upload {name}: {error}",
+  "chatInput.attachmentUploadHttpStatus": "the server responded with HTTP {status}",
+  "chatInput.attachmentUploadBadResponse": "the server sent an unexpected response",
   "chatInput.attachmentTooManyFiles": "{name} was not attached: an attachment can hold at most {count} files.",
   "chatInput.attachmentTooLarge": "{name} was not attached: an attachment can be at most {size}.",
   "chatInput.attachmentFolderEmpty": "{name} was not attached: the folder has no files.",

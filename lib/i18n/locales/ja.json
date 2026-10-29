@@ -370,6 +370,8 @@
   "chatInput.attachmentPreparing": "準備中…",
   "chatInput.attachmentUploadsPending": "添付ファイルをアップロード中です。完了してから再度送信してください。",
   "chatInput.attachmentUploadFailed": "{name} をアップロードできませんでした：{error}",
+  "chatInput.attachmentUploadHttpStatus": "サーバーが HTTP {status} を返しました",
+  "chatInput.attachmentUploadBadResponse": "サーバーから予期しない応答が返されました",
   "chatInput.attachmentTooManyFiles": "{name} は添付されませんでした：1 つの添付に含められるファイルは最大 {count} 件です。",
   "chatInput.attachmentTooLarge": "{name} は添付されませんでした：1 つの添付の上限は {size} です。",
   "chatInput.attachmentFolderEmpty": "{name} は添付されませんでした：フォルダにファイルがありません。",

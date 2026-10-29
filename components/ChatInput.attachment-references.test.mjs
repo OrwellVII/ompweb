@@ -218,3 +218,38 @@ test("a failed upload reports the server's reason", async () => {
   assert.equal((await screen.findByRole("alert")).textContent, "Could not upload bad.bin: Invalid attachment name: bad");
   assert.equal(getDraft(KEY), null);
 });
+
+test("an upload failure without a server reason names the HTTP status", async () => {
+  globalThis.fetch = async () => new Response("Bad Gateway", { status: 502 });
+  const { ref } = renderComposer();
+  await act(async () => {
+    ref.current.addFiles([new File([PDF_BYTES], "gateway.bin", { type: "application/octet-stream" })]);
+  });
+  assert.equal((await screen.findByRole("alert")).textContent, "Could not upload gateway.bin: the server responded with HTTP 502");
+});
+
+test("Add folder in the plus menu uploads the picked folder as one reference", async () => {
+  const server = installAttachmentServer();
+  const user = userEvent.setup();
+  renderComposer();
+  await user.click(screen.getByRole("button", { name: "More actions" }));
+  await user.click(screen.getByRole("menuitem", { name: /add folder/i }));
+  assert.equal(screen.queryByRole("menu"), null, "choosing the item closes the menu");
+  // A webkitdirectory pick lists every file with its path under the folder.
+  const picked = (relativePath, content) => {
+    const file = new File([content], relativePath.split("/").pop());
+    Object.defineProperty(file, "webkitRelativePath", { value: relativePath });
+    return file;
+  };
+  await user.upload(document.querySelector("input[webkitdirectory]"), [
+    picked("photos/a.jpg", PDF_BYTES),
+    picked("photos/raw/b.cr2", "xyz"),
+  ]);
+  await waitFor(() => assert.equal(getDraft(KEY)?.references?.length, 1));
+  assert.deepEqual([...server.batches.values()], [{
+    kind: "folder",
+    name: "photos",
+    files: [{ path: "photos/a.jpg", size: 6 }, { path: "photos/raw/b.cr2", size: 3 }],
+  }]);
+  assert.ok(screen.getByText("photos/"));
+});
