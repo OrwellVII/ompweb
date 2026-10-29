@@ -269,7 +269,10 @@ hooks/
   an instance from firing slots; editing and **Run now** still work there.
 - A store file that cannot be read or parsed is an error (the list route
   returns 500 with the path), never an empty store that the next write would
-  save over the user's tasks. `startRun`'s `done` never rejects: a failed
+  save over the user's tasks. Malformed entries inside a valid file are left
+  out of the store; the first write that would drop them copies the file to
+  `scheduled-tasks.json.dropped-<ms>` first (and writes nothing if the copy
+  fails). `startRun`'s `done` never rejects: a failed
   history write at run end is logged, because `instrumentation.node.ts` exits
   the server on unhandled rejections.
 - Tool approvals follow the user's approval mode: an unattended run can sit on

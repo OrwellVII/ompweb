@@ -2,14 +2,15 @@ import { createHash, randomUUID } from "crypto";
 import { closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { getAgentDir } from "./omp/paths";
-import { emptyScheduledTaskStore, parseScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-tasks";
+import { emptyScheduledTaskStore, parseScheduledTaskStore, type ParsedScheduledTaskStore, type ScheduledTaskStore } from "./scheduled-tasks";
 
 // Scheduled tasks on disk: ~/.omp/agent/omp-web/scheduled-tasks.json, shared by
 // every browser and by every omp-web instance on the agent dir (an installed
 // service plus `npm run dev`). The file is replaced atomically (temp file +
 // rename) and every read-modify-write runs under a cross-process lock, so two
 // instances never lose each other's updates. A store that cannot be read or
-// parsed fails loudly and is never overwritten.
+// parsed fails loudly and is never overwritten; a write that would drop
+// malformed entries first keeps the file as `scheduled-tasks.json.dropped-<ms>`.
 //
 // Coordination between instances uses owner files that hold the owner's pid
 // and a token unique to that acquisition; a file whose owner process is gone
@@ -159,22 +160,35 @@ function release(path: string): void {
   }
 }
 
-/** Current store. Throws when the file exists but cannot be read or parsed. */
-export function loadScheduledTaskStore(): ScheduledTaskStore {
+/** The file's text and parse; throws when it exists but cannot be read or parsed. */
+function readScheduledTaskStore(): ParsedScheduledTaskStore & { text: string | null } {
   const path = storePath();
   let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyScheduledTaskStore();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { store: emptyScheduledTaskStore(), dropped: 0, text: null };
     throw error;
   }
   try {
-    return parseScheduledTaskStore(text);
+    return { ...parseScheduledTaskStore(text), text };
   } catch (error) {
     // Not a SyntaxError: routes map those to "invalid request body".
     throw new Error(`Cannot parse ${path}; fix or remove it: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** Current store. Throws when the file exists but cannot be read or parsed. */
+export function loadScheduledTaskStore(): ScheduledTaskStore {
+  return readScheduledTaskStore().store;
+}
+
+/** Keep the file as it is before a write drops `dropped` malformed entries
+ *  from it; throws (so nothing is written) when the copy fails. */
+function backUpDroppedEntries(text: string, dropped: number): void {
+  const backup = `${storePath()}.dropped-${Date.now()}`;
+  writeFileSync(backup, text, { encoding: "utf8", flag: "wx" });
+  console.warn(`[omp-web] ${storePath()}: ${dropped} malformed entr${dropped === 1 ? "y was" : "ies were"} dropped; the previous file is kept as ${backup}`);
 }
 
 function saveScheduledTaskStore(store: ScheduledTaskStore): void {
@@ -206,9 +220,12 @@ export function updateScheduledTaskStore<T>(update: (store: ScheduledTaskStore) 
     sleepSync(LOCK_RETRY_MS);
   }
   try {
-    const store = loadScheduledTaskStore();
+    const { store, dropped, text } = readScheduledTaskStore();
     const result = update(store);
-    if (result !== false) saveScheduledTaskStore(store);
+    if (result !== false) {
+      if (dropped > 0 && text !== null) backUpDroppedEntries(text, dropped);
+      saveScheduledTaskStore(store);
+    }
     return result;
   } finally {
     release(lockPath);

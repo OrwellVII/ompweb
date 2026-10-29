@@ -334,25 +334,43 @@ function isRunRecord(value: unknown): value is ScheduledTaskRun {
     && (value.pid === undefined || value.pid === null || (typeof value.pid === "number" && Number.isInteger(value.pid)));
 }
 
+export interface ParsedScheduledTaskStore {
+  store: ScheduledTaskStore;
+  /** Entries of the file that `store` does not keep (malformed, duplicate,
+   *  over the task limit, or runs of a task that is not kept). Saving `store`
+   *  over the file would lose them. */
+  dropped: number;
+}
+
 /**
- * Parse the on-disk store. Malformed task and run entries are dropped; a file
- * that is not a JSON object throws (SyntaxError), so a damaged store is
- * reported instead of being read as empty and then overwritten.
+ * Parse the on-disk store. Malformed entries are left out of `store` and
+ * counted in `dropped`; a file that is not a JSON object throws (SyntaxError),
+ * so a damaged store is reported instead of being read as empty and then
+ * overwritten.
  */
-export function parseScheduledTaskStore(text: string): ScheduledTaskStore {
+export function parseScheduledTaskStore(text: string): ParsedScheduledTaskStore {
   const raw: unknown = JSON.parse(text);
   if (!isRecord(raw)) throw new SyntaxError("Scheduled task store is not a JSON object");
+  let dropped = 0;
+  const list = (value: unknown): unknown[] => {
+    if (Array.isArray(value)) return value;
+    if (value !== undefined) dropped += 1;
+    return [];
+  };
+  const rawTasks = list(raw.tasks);
+  const rawRuns = list(raw.runs);
   const tasks: ScheduledTask[] = [];
   const ids = new Set<string>();
-  for (const entry of Array.isArray(raw.tasks) ? raw.tasks : []) {
+  for (const entry of rawTasks) {
     const task = parseStoredTask(entry);
-    if (!task || ids.has(task.id)) continue;
+    if (!task || ids.has(task.id) || tasks.length >= SCHEDULED_TASK_LIMITS.maxTasks) continue;
     ids.add(task.id);
     tasks.push(task);
   }
-  const runs = (Array.isArray(raw.runs) ? raw.runs : [])
+  const runs = rawRuns
     .filter(isRunRecord)
     .filter((run) => ids.has(run.taskId))
     .map((run) => ({ ...run, pid: run.pid ?? null }));
-  return { version: 1, tasks: tasks.slice(0, SCHEDULED_TASK_LIMITS.maxTasks), runs };
+  dropped += rawTasks.length - tasks.length + rawRuns.length - runs.length;
+  return { store: { version: 1, tasks, runs }, dropped };
 }
