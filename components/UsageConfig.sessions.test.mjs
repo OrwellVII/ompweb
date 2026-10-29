@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
+import { cleanup, render, waitFor, within } from "@testing-library/react/pure.js";
+import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
@@ -65,18 +66,19 @@ async function renderSessionsTab(opened) {
     requests.push(String(url));
     return { ok: true, json: async () => report() };
   };
+  const user = userEvent.setup();
   const view = render(React.createElement(UsageConfig, { onOpenSession: (id) => opened.push(id) }));
   const tab = await waitFor(() => view.getByRole("button", { name: "CONVERSATION" }));
-  fireEvent.click(tab);
+  await user.click(tab);
   assert.equal(tab.getAttribute("aria-pressed"), "true");
-  return { view, requests };
+  return { view, requests, user };
 }
 
 const rowIds = (container) => [...container.querySelectorAll("tr[data-session-id]")].map((tr) => tr.getAttribute("data-session-id"));
 
 test("the conversation tab lists the most expensive conversations first and opens one on click", async () => {
   const opened = [];
-  const { view, requests } = await renderSessionsTab(opened);
+  const { view, requests, user } = await renderSessionsTab(opened);
   assert.match(requests[0], /^\/api\/usage\?range=30d&/);
 
   // Server order (cost descending) is kept, capped at the preview limit.
@@ -92,62 +94,65 @@ test("the conversation tab lists the most expensive conversations first and open
   assert.match(first.querySelector("td:nth-child(1)").textContent, /2026/);
   assert.equal(first.querySelector("td:nth-child(5)").textContent, "3");
 
-  fireEvent.click(view.getByRole("button", { name: "Session 0" }));
+  await user.click(view.getByRole("button", { name: "Session 0" }));
   assert.deepEqual(opened, ["s0"], "the title button opens it once");
 
   // Any cell of the row opens it too.
-  fireEvent.click(view.container.querySelector('tr[data-session-id="s3"] td:nth-child(2)'));
+  await user.click(view.container.querySelector('tr[data-session-id="s3"] td:nth-child(2)'));
   assert.deepEqual(opened, ["s0", "s3"]);
 });
 
 test("releasing a text selection in a row does not open it; a selection elsewhere does not block it", async () => {
   const opened = [];
-  const { view } = await renderSessionsTab(opened);
+  const { view, user } = await renderSessionsTab(opened);
   const row = view.container.querySelector('tr[data-session-id="s3"]');
+  const title = within(row).getByRole("button", { name: "Session 3" });
+  const dragSelect = (target) => user.pointer([{ keys: "[MouseLeft>]", target, offset: 0 }, { offset: 3 }, { keys: "[/MouseLeft]" }]);
 
-  // Drag-selecting the title to copy it ends with a click on the row.
-  window.getSelection().selectAllChildren(row.querySelector("button"));
-  fireEvent.click(row.querySelector("td:nth-child(2)"));
-  fireEvent.click(row.querySelector("button"));
+  // Drag-selecting text in the row to copy it ends with a click on the row.
+  await dragSelect(row.querySelector("td:nth-child(2)"));
+  assert.equal(String(window.getSelection()), "$52");
   assert.deepEqual(opened, []);
 
-  window.getSelection().selectAllChildren(view.container.querySelector('tr[data-session-id="s4"] td'));
-  fireEvent.click(row.querySelector("button"));
+  // Text selected in another row does not keep this one from opening.
+  await dragSelect(view.container.querySelector('tr[data-session-id="s4"] td:nth-child(2)'));
+  assert.equal(String(window.getSelection()), "$51");
+  await user.click(title);
   assert.deepEqual(opened, ["s3"], "the title button still opens it");
 });
 
 test("a deleted conversation is labelled and cannot be opened", async () => {
   const opened = [];
-  const { view } = await renderSessionsTab(opened);
+  const { view, user } = await renderSessionsTab(opened);
 
   const deleted = view.container.querySelector('tr[data-session-id="s1"]');
   assert.equal(deleted.querySelector("button"), null);
   assert.match(deleted.textContent, /Deleted/);
-  fireEvent.click(view.getByText("Session 1"));
-  fireEvent.click(deleted.querySelector("td:nth-child(2)"));
+  await user.click(view.getByText("Session 1"));
+  await user.click(deleted.querySelector("td:nth-child(2)"));
   assert.deepEqual(opened, []);
 });
 
 test("a conversation too large to load is labelled and cannot be opened", async () => {
   const opened = [];
-  const { view } = await renderSessionsTab(opened);
+  const { view, user } = await renderSessionsTab(opened);
 
   const tooLarge = view.container.querySelector('tr[data-session-id="s2"]');
   assert.equal(tooLarge.querySelector("button"), null);
   assert.match(tooLarge.textContent, /Too large/);
   assert.match(view.getByText("Session 2").getAttribute("title"), /too large to open/);
-  fireEvent.click(view.getByText("Session 2"));
-  fireEvent.click(tooLarge.querySelector("td:nth-child(2)"));
+  await user.click(view.getByText("Session 2"));
+  await user.click(tooLarge.querySelector("td:nth-child(2)"));
   assert.deepEqual(opened, []);
 });
 
 test("show all lists every conversation and can collapse back to the top ones", async () => {
-  const { view } = await renderSessionsTab([]);
+  const { view, user } = await renderSessionsTab([]);
 
-  fireEvent.click(view.getByRole("button", { name: `Show all ${SESSION_COUNT} conversations` }));
+  await user.click(view.getByRole("button", { name: `Show all ${SESSION_COUNT} conversations` }));
   assert.equal(rowIds(view.container).length, SESSION_COUNT);
   assert.equal(rowIds(view.container).at(-1), `s${SESSION_COUNT - 1}`);
 
-  fireEvent.click(view.getByRole("button", { name: `Show top ${SESSION_PREVIEW_LIMIT} only` }));
+  await user.click(view.getByRole("button", { name: `Show top ${SESSION_PREVIEW_LIMIT} only` }));
   assert.equal(rowIds(view.container).length, SESSION_PREVIEW_LIMIT);
 });
