@@ -49,6 +49,21 @@ export function withSessionPinned(pins: readonly string[], id: string, pinned: b
   return index === -1 ? pins : pins.filter((pin) => pin !== id);
 }
 
+/** Undo one optimistic pin toggle: give `id` back the pinned state it had in
+ *  `before`, leaving every other entry of `current` as is (other toggles may
+ *  have landed meanwhile). A restored pin returns to its old place: right
+ *  after the nearest pin that preceded it and is still pinned. */
+export function restoreSessionPin(current: readonly string[], before: readonly string[], id: string): readonly string[] {
+  const index = before.indexOf(id);
+  if (index === -1) return withSessionPinned(current, id, false);
+  if (current.includes(id)) return current;
+  for (let previous = index - 1; previous >= 0; previous--) {
+    const at = current.indexOf(before[previous]);
+    if (at !== -1) return [...current.slice(0, at + 1), id, ...current.slice(at + 1)];
+  }
+  return [id, ...current];
+}
+
 /** Split sessions into the sidebar's Pinned group (in pin order; pins whose
  *  session is gone are skipped) and the rest (input order kept). */
 export function partitionPinnedSessions(

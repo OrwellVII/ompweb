@@ -11,7 +11,7 @@ import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, nextPinOrder, orderProjects, projectActivityCounts, type ProjectSortMode } from "@/lib/project-ordering";
-import { partitionPinnedSessions, withSessionPinned } from "@/lib/session-pins";
+import { partitionPinnedSessions, restoreSessionPin, withSessionPinned } from "@/lib/session-pins";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { compileSearchQuery, FIRST_MESSAGE_WEIGHT, scoreSearchFields, searchField, TITLE_WEIGHT } from "@/lib/session-search";
 import { Archive, ArrowDownUp, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Loader2, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
@@ -117,7 +117,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Pinned session ids in sidebar order (server-side, shared by every device).
+  // The ref mirrors every write so the optimistic toggle can read the current
+  // list outside a state updater; write only through commitPinnedSessionIds.
   const [pinnedSessionIds, setPinnedSessionIds] = useState<readonly string[]>([]);
+  const pinnedSessionIdsRef = useRef<readonly string[]>([]);
+  const commitPinnedSessionIds = useCallback((next: readonly string[]) => {
+    pinnedSessionIdsRef.current = next;
+    setPinnedSessionIds(next);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -228,7 +235,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }>; pinnedSessionIds?: string[] };
       setAllSessions(data.sessions);
       const pins = data.pinnedSessionIds ?? [];
-      setPinnedSessionIds((prev) => (prev.length === pins.length && prev.every((id, index) => id === pins[index]) ? prev : pins));
+      const currentPins = pinnedSessionIdsRef.current;
+      if (currentPins.length !== pins.length || currentPins.some((id, index) => id !== pins[index])) commitPinnedSessionIds(pins);
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
           if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
@@ -267,7 +275,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       initialLoadedRef.current = true;
       if (showLoading) setLoading(false);
     }
-  }, [t]);
+  }, [t, commitPinnedSessionIds]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -1107,15 +1115,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   /** Pin a session to the end of the Pinned group, or unpin it. The list
    *  updates at once and reverts if the server refuses. */
   const handleToggleSessionPin = useCallback(async (session: SessionInfo, pinned: boolean) => {
-    // Keep the exact list to restore: re-pinning on failure would append the
-    // session instead of returning it to its place.
-    let before: readonly string[] = [];
-    let after: readonly string[] = [];
-    setPinnedSessionIds((prev) => {
-      before = prev;
-      after = withSessionPinned(prev, session.id, pinned);
-      return after;
-    });
+    const before = pinnedSessionIdsRef.current;
+    commitPinnedSessionIds(withSessionPinned(before, session.id, pinned));
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
@@ -1124,12 +1125,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
     } catch {
-      setPinnedSessionIds((current) => (current === after ? before : withSessionPinned(current, session.id, !pinned)));
+      // A failed write leaves the server ETag unchanged, so a refresh would 304
+      // and keep the optimistic list: undo this toggle here, keeping any other
+      // toggle made meanwhile and a failed unpin's old place in the group.
+      commitPinnedSessionIds(restoreSessionPin(pinnedSessionIdsRef.current, before, session.id));
       toast.error(t("sessionSidebar.pinFailed"));
       return;
     }
     void loadSessions();
-  }, [loadSessions, t]);
+  }, [commitPinnedSessionIds, loadSessions, t]);
 
   const togglePinnedCollapsed = useCallback(() => {
     setPinnedCollapsed((collapsed) => {
@@ -1680,7 +1684,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             </div>
           )}
 
-          {!loading && !projectsError && !error && pinnedSessions.length > 0 && (
+          {!loading && pinnedSessions.length > 0 && (
             <PinnedSessionsGroup
               sessions={pinnedSessions}
               collapsed={pinnedCollapsed}
@@ -1689,6 +1693,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
               runningSessionIds={runningSessionIds}
               unreadSessionIds={unreadSessionIds}
               exitedSessions={exitedSessions}
+              recentlyCompletedIds={effectiveRecentCompletedSet}
               relativeTimeNow={relativeTimeNow}
               onSelectSession={handleSelectSessionFromList}
               onRenamed={loadSessions}

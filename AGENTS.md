@@ -127,7 +127,7 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
-  session-pins.ts      pure pinned-session helpers: parse, pin/unpin, Pinned-group partition (client + tests)
+  session-pins.ts      pure pinned-session helpers: parse, pin/unpin, failed-toggle restore, Pinned-group partition (client + tests)
   session-pin-registry.ts  on-disk pinned sessions (~/.omp/agent/omp-web/session-pins.json)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
@@ -562,11 +562,16 @@ during the wait.
   archive drop the pin, so a session restored from the archive comes back unpinned.
 - At rest the sidebar shows a **Pinned** group above the workspaces (pin order,
   flat rows; collapsed state in `localStorage` `omp-web:pinned-sessions-collapsed`)
-  and leaves pinned sessions out of their workspace's tree and activity counts.
+  and leaves pinned sessions out of their workspace's tree and activity counts,
+  so the group renders whenever the workspace rows do (also under a refresh
+  error banner, which keeps the last list). Pinned rows get the same row props
+  (unread, running, recently completed) as workspace rows.
   While a search or the running filter is active, pinned sessions stay in their
   workspaces so results read as one ranked list. Pin/Unpin sits first in the
   session row menu; the toggle is optimistic and reverts on failure (a failed
-  write leaves the server ETag unchanged, so a refresh alone would not).
+  write leaves the server ETag unchanged, so a refresh alone would not). The
+  revert (`restoreSessionPin`) undoes only that session, back in its old place,
+  and reads the list from a ref mirrored on every write, never from a state updater.
 
 ### Clone a repository as a new workspace (`/api/projects/clone`)
 - The Add-workspace `DirectoryPicker` takes an optional Git URL; "Clone here"

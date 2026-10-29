@@ -460,6 +460,7 @@ interface PinnedSessionsGroupProps {
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  recentlyCompletedIds: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   relativeTimeNow: number;
   onSelectSession: (s: SessionInfo) => void;
@@ -480,6 +481,7 @@ function PinnedSessionsGroup({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  recentlyCompletedIds,
   exitedSessions,
   relativeTimeNow,
   onSelectSession,
@@ -526,6 +528,7 @@ function PinnedSessionsGroup({
               runningSessionIds={runningSessionIds}
               unreadSessionIds={unreadSessionIds}
               exitedSessions={exitedSessions}
+              recentlyCompletedIds={recentlyCompletedIds}
               relativeTimeNow={relativeTimeNow}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
