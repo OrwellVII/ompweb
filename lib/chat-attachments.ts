@@ -168,7 +168,9 @@ function fenceForContent(content: string): string {
 function describeReference(reference: AttachmentReferenceData): string {
   const size = formatReferenceBytes(reference.size);
   if (reference.kind === "file") return `- ${reference.path} (file, ${size})`;
-  const folderPath = reference.path.endsWith("/") ? reference.path : `${reference.path}/`;
+  // A Windows server returns backslash paths; end the folder with the same separator.
+  const separator = /^[A-Za-z]:\\|^\\\\/.test(reference.path) ? "\\" : "/";
+  const folderPath = reference.path.endsWith(separator) ? reference.path : `${reference.path}${separator}`;
   const files = `${reference.fileCount} ${reference.fileCount === 1 ? "file" : "files"}`;
   return `- ${folderPath} (folder, ${files}, ${size})`;
 }
