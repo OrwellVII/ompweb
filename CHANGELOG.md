@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
-- **Attach any file, or a whole folder, for the model to read.** Files that cannot be inlined as text — PDFs, Office documents, archives and other binaries, or text past the inline budget — used to be dropped; they are now uploaded and sent as a path reference, and the new **Add folder** item in the composer's plus menu (or dropping a folder onto the chat) uploads a folder with its structure intact. The prompt ends with an `Attached paths` list of absolute paths the model reads with its own tools. Uploads are stored under `~/.omp/agent/omp-web/attachments/`, limited to 2,000 files and 200 MB per file or folder, and removed after 30 days. Small text files and images attach as before.
+- **Attach any file, or a whole folder, for the model to read.** Files that cannot be inlined as text — PDFs, Office documents, archives and other binaries, or text past the inline budget — used to be dropped; they are now uploaded and sent as a path reference, and the new **Add folder** item in the composer's plus menu (or dropping a folder onto the chat) uploads a folder's files at their relative paths (empty subfolders are not recreated). The prompt ends with an `Attached paths` list of absolute paths the model reads with its own tools. Uploads are stored under `~/.omp/agent/omp-web/attachments/`, limited to 2,000 files and 200 MB per file or folder, and removed after 30 days. Small text files and images attach as before.
 
 ### Fixes & Improvements
 

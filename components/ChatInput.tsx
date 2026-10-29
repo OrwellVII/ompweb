@@ -722,6 +722,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingReferenceRevisionsRef.current.delete(id);
       setPendingReferences((prev) => prev.filter((item) => item.id !== id));
+      // The "still uploading" refusal is stale once this composer has no
+      // upload left; any other message (a failure, a limit) stays.
+      if (![...pendingReferenceRevisionsRef.current.values()].includes(attachmentRevisionRef.current)) {
+        const pendingMessage = t("chatInput.attachmentUploadsPending");
+        setAttachError((current) => (current === pendingMessage ? null : current));
+      }
     }
   }, [t]);
 

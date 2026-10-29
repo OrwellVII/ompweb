@@ -31,11 +31,12 @@ beforeEach(() => {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 });
 
-/** In-memory /api/attachments. `holdCompletion()` keeps the final POST open. */
+/** In-memory /api/attachments. `holdCompletion(name?)` keeps the final POST
+ *  open for that batch name (every batch when omitted). */
 function installAttachmentServer() {
   const batches = new Map();
   const requests = [];
-  let held = null;
+  const holds = new Map();
   globalThis.fetch = async (url, init = {}) => {
     const method = init.method ?? "GET";
     requests.push(`${method} ${url}`);
@@ -48,7 +49,8 @@ function installAttachmentServer() {
     const batch = batches.get(batchId);
     if (!batch) return Response.json({ error: "Attachment not found", code: "attachment_not_found" }, { status: 404 });
     if (method === "PUT") return Response.json({ ok: true });
-    if (held) await held.promise;
+    const hold = holds.get(batch.name) ?? holds.get("*");
+    if (hold) await hold;
     return Response.json({
       batchId,
       kind: batch.kind,
@@ -61,10 +63,10 @@ function installAttachmentServer() {
   return {
     batches,
     requests,
-    holdCompletion() {
-      let release;
-      held = { promise: new Promise((resolve) => { release = resolve; }) };
-      return () => { held = null; release(); };
+    holdCompletion(name = "*") {
+      const { promise, resolve } = Promise.withResolvers();
+      holds.set(name, promise);
+      return () => { holds.delete(name); resolve(); };
     },
   };
 }
@@ -149,6 +151,7 @@ test("a folder upload shows its file count, holds back sending until done, and s
 
   await act(async () => { release(); });
   await waitFor(() => assert.equal(getDraft(KEY)?.references?.length, 1));
+  assert.equal(screen.queryByRole("alert"), null, "the refusal clears once the upload lands");
   assert.deepEqual([...server.batches.values()][0].files, [
     { path: "dataset/a.csv", size: 3 },
     { path: "dataset/sub/b.bin", size: 6 },
@@ -166,6 +169,29 @@ test("a folder upload shows its file count, holds back sending until done, and s
   await waitFor(() => assert.equal(sent.length, 1));
   const [batchId] = server.batches.keys();
   assert.ok(sent[0].endsWith(`- /srv/attachments/${batchId}/dataset/ (folder, 2 files, 9 B)`), sent[0]);
+});
+
+test("the still-uploading refusal stays until the last upload lands", async () => {
+  const server = installAttachmentServer();
+  const releaseFast = server.holdCompletion("fast");
+  const releaseSlow = server.holdCompletion("slow");
+  const user = userEvent.setup();
+  const { sent, ref } = renderComposer();
+  const folder = (name) => ({ name, entries: async () => [{ path: `${name}/a.txt`, file: new File(["abc"], "a.txt") }] });
+  act(() => { ref.current.addFolders([folder("fast"), folder("slow")]); });
+  assert.ok(await screen.findByRole("status", { name: "Uploading slow" }));
+  await user.type(screen.getByRole("textbox"), "look");
+  await user.click(screen.getByRole("button", { name: /^send$/i }));
+  assert.match((await screen.findByRole("alert")).textContent, /still uploading/);
+
+  await act(async () => { releaseFast(); });
+  await waitFor(() => assert.equal(getDraft(KEY)?.references?.length, 1));
+  assert.match(screen.getByRole("alert").textContent, /still uploading/, "another upload is still running");
+
+  await act(async () => { releaseSlow(); });
+  await waitFor(() => assert.equal(getDraft(KEY)?.references?.length, 2));
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.deepEqual(sent, []);
 });
 
 test("removing a reference chip drops it from the prompt", async () => {
