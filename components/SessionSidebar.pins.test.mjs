@@ -10,6 +10,7 @@ import { createJiti } from "jiti";
 globalThis.Worker ??= class { onmessage = null; onerror = null; postMessage() {} };
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 const { SessionSidebar } = await jiti.import("@/components/SessionSidebar");
+const { ToastProvider } = await jiti.import("@/components/ui/toast");
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -72,4 +73,54 @@ test("a failed pin write refetches the list without its ETag so the server's pin
   await waitFor(() => assert.equal(listRequests.length, 3));
   assert.equal(listRequests[2], null, "the refetch after a failed pin write is unconditional");
   await waitFor(() => assert.equal(document.querySelector(".sidebar-pinned-sessions"), null, "the server's pins win over the rollback"));
+});
+
+const parent = { ...session, path: "/work/proj/s-parent.jsonl", id: "s-parent", name: "Parent session" };
+const pinnedFork = { ...session, path: "/work/proj/s-fork.jsonl", id: "s-fork", name: "Pinned fork", parentSessionId: "s-parent" };
+
+function serveList(sessions, pinnedSessionIds, onArchive) {
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "/api/sessions") {
+      return new Response(JSON.stringify({ sessions, runningSessionIds: [], runningSessions: [], pinnedSessionIds }), { status: 200 });
+    }
+    if (url === "/api/projects") return new Response(JSON.stringify({ projects: [{ path: "/work/proj" }] }), { status: 200 });
+    if (url === "/api/sessions/s-parent/archive" && init.method === "POST") return onArchive();
+    return new Response("{}", { status: 404 });
+  };
+}
+
+async function openWorkspaceRowMenu(name) {
+  const row = await waitFor(() => {
+    const found = [...document.querySelectorAll(".sidebar-project-sessions .session-item-row")].find((element) => element.textContent.includes(name));
+    assert.ok(found, `${name} is listed in its workspace`);
+    return found;
+  });
+  const user = userEvent.setup();
+  await user.click(within(row).getByRole("button", { name: "Project actions" }));
+  return { user, archive: await screen.findByRole("menuitem", { name: "Archive" }) };
+}
+
+test("a session whose only fork is pinned cannot be archived from its workspace", async () => {
+  let archiveRequests = 0;
+  serveList([parent, pinnedFork], ["s-fork"], () => { archiveRequests += 1; return new Response("{}", { status: 200 }); });
+  render(React.createElement(SessionSidebar, { selectedSessionId: null, onSelectSession: noop, addProjectOpen: false, setAddProjectOpen: noop, onOpenArchive: noop }));
+  await waitFor(() => assert.ok(document.querySelector(".sidebar-pinned-sessions")?.textContent.includes("Pinned fork")));
+
+  const { archive } = await openWorkspaceRowMenu("Parent session");
+  assert.equal(archive.disabled, true, "the server only archives leaf sessions");
+  assert.equal(archive.title, "Archive child sessions first");
+  assert.equal(archiveRequests, 0);
+});
+
+test("a server refusal to archive a session with forks explains the leaf-only rule", async () => {
+  // A stale list still shows the parent as a leaf; the server knows better.
+  serveList([parent], [], () => new Response(JSON.stringify({ error: "has children", code: "session_has_children" }), { status: 409 }));
+  render(React.createElement(ToastProvider, null, React.createElement(SessionSidebar, { selectedSessionId: null, onSelectSession: noop, addProjectOpen: false, setAddProjectOpen: noop, onOpenArchive: noop })));
+
+  const { user, archive } = await openWorkspaceRowMenu("Parent session");
+  assert.equal(archive.disabled, false);
+  await user.click(archive);
+  await waitFor(() => assert.ok(document.body.textContent.includes("Archive child sessions first"), "the toast names the leaf-only rule"));
+  assert.ok(!document.body.textContent.includes("Failed to archive the session"));
 });

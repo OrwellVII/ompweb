@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
-- **Pin sessions.** Choose **Pin** in a session's menu to move it into a **Pinned** group above the workspaces, where pinned sessions from every workspace stay in the order you pinned them; **Unpin** returns it to its workspace. The group collapses like a workspace. While you search or filter to running sessions, pinned sessions show in their workspaces with the other results. Pins are stored on the server, so every browser and device sees the same ones; deleting or archiving a session removes its pin.
+- **Pin sessions.** Choose **Pin** in a session's menu to move it into a **Pinned** group above the workspaces, where pinned sessions from every workspace stay in the order you pinned them; **Unpin** returns it to its workspace. The group collapses like a workspace. While you search or filter to running sessions, pinned sessions show in their workspaces with the other results. Pins are stored on the server, so every browser and device sees the same ones; deleting or archiving a session removes its pin. Like any session with forks, a session whose fork is pinned can only be archived after that fork is.
 
 ### Fixes & Improvements
 

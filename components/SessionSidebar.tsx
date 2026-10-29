@@ -1747,6 +1747,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onSessionDeleted={handleSessionDeleted}
                 pinnedSessionIds={pinnedSessionSet}
                 onToggleSessionPin={handleToggleSessionPin}
+                parentSessionIds={parentSessionIds}
               />
             );
           })}

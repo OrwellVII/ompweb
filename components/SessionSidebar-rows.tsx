@@ -65,6 +65,8 @@ interface ProjectRowProps {
   onSessionDeleted?: (id: string) => void;
   pinnedSessionIds: Set<string>;
   onToggleSessionPin: (session: SessionInfo, pinned: boolean) => void;
+  /** Ids of sessions that have forks anywhere in the list, including the Pinned group. */
+  parentSessionIds: Set<string>;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -100,6 +102,7 @@ function ProjectRow({
   onSessionDeleted,
   pinnedSessionIds,
   onToggleSessionPin,
+  parentSessionIds,
 }: ProjectRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -412,6 +415,7 @@ function ProjectRow({
                   onSessionDeleted={onSessionDeleted}
                   pinnedSessionIds={pinnedSessionIds}
                   onToggleSessionPin={onToggleSessionPin}
+                  parentSessionIds={parentSessionIds}
                   depth={0}
                 />
               ))}
@@ -559,6 +563,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   pinnedSessionIds,
   onToggleSessionPin,
   hasForksElsewhere = false,
+  parentSessionIds,
   depth,
 }: {
   node: SessionTreeNode;
@@ -575,6 +580,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onToggleSessionPin: (session: SessionInfo, pinned: boolean) => void;
   /** The session has forks that are listed in its workspace, not under this row. */
   hasForksElsewhere?: boolean;
+  /** Ids of sessions that have forks anywhere; a fork moved to Pinned still blocks archive. */
+  parentSessionIds?: Set<string>;
   depth: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -589,6 +596,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const isRecentlyCompleted = !isRunning && (recentlyCompletedIds?.has(sessionId) ?? false);
   const exited = exitedSessions.get(sessionId);
   const isPinned = pinnedSessionIds.has(sessionId);
+  const archiveBlocked = hasChildren || hasForksElsewhere || (parentSessionIds?.has(sessionId) ?? false);
 
   // Stable callbacks: depend only on primitives / stable parent callbacks so
   // SessionItem's React.memo stays effective across re-renders.
@@ -632,7 +640,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           onDeleted={handleDeleted}
           depth={depth}
           hasChildren={hasChildren}
-          archiveBlocked={hasChildren || hasForksElsewhere}
+          archiveBlocked={archiveBlocked}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
           pinned={isPinned}
@@ -656,6 +664,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               onSessionDeleted={onSessionDeleted}
               pinnedSessionIds={pinnedSessionIds}
               onToggleSessionPin={onToggleSessionPin}
+              parentSessionIds={parentSessionIds}
               depth={depth + 1}
             />
           ))}
@@ -688,6 +697,12 @@ const SessionTreeItem = memo(function SessionTreeItem({
     if (prev.node.children.length > 0) return false;
     const id = prev.node.session.id;
     if (prev.pinnedSessionIds.has(id) !== next.pinnedSessionIds.has(id)) return false;
+  }
+  if (prev.parentSessionIds !== next.parentSessionIds) {
+    // Descendants read the set too, so any change matters when this node has forks below.
+    if (prev.node.children.length > 0) return false;
+    const id = prev.node.session.id;
+    if ((prev.parentSessionIds?.has(id) ?? false) !== (next.parentSessionIds?.has(id) ?? false)) return false;
   }
   if (prev.exitedSessions !== next.exitedSessions) return false;
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
@@ -786,7 +801,12 @@ const SessionItem = memo(function SessionItem({
  setDeleting(true);
  try {
  const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
- if (!response.ok) throw new Error("Session archive failed");
+ if (!response.ok) {
+ const body = await response.json().catch(() => null) as { code?: unknown } | null;
+ setDeleting(false);
+ toast.error(t(body?.code === "session_has_children" ? "sessionSidebar.archiveLeafOnly" : "sessionSidebar.archiveFailed"));
+ return;
+ }
  onDeleted?.(session.id);
  } catch {
  setDeleting(false);
