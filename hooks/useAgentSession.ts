@@ -360,10 +360,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // arrive in any order. Absent (no live process) clears it.
   const [queueProgress, setQueueProgress] = useState<QueueProgressSnapshot | null>(null);
   const queueProgressRef = useRef<QueueProgressSnapshot | null>(null);
-  const applyQueueProgress = useCallback((value: unknown) => {
+  // `queue_progress` frames received so far. An HTTP snapshot carries the
+  // count read before its request: revisions cannot order a different ledger
+  // (a replaced process) or none against a frame that arrived meanwhile.
+  const queueProgressFramesRef = useRef(0);
+  const applyQueueProgress = useCallback((value: unknown, framesBeforeRequest?: number) => {
     const next = readQueueProgressSnapshot(value);
     const current = queueProgressRef.current;
-    if (next && current && next.epoch === current.epoch && next.revision <= current.revision) return;
+    if (next && current && next.epoch === current.epoch) {
+      if (next.revision <= current.revision) return;
+    } else if (framesBeforeRequest !== undefined && framesBeforeRequest !== queueProgressFramesRef.current) {
+      return;
+    }
     if (!next && !current) return;
     queueProgressRef.current = next;
     setQueueProgress(next);
@@ -893,6 +901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // sync that started while this request was in flight.
         const token = beginAuthoritativeModelSync();
         const queueRevision = ++queueSeqRef.current;
+        const queueProgressFrames = queueProgressFramesRef.current;
         const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
@@ -932,11 +941,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
           applyQueueStateSnapshot(queueRevision, liveState.queuedMessages);
-          applyQueueProgress(liveState.queueProgress);
+          applyQueueProgress(liveState.queueProgress, queueProgressFrames);
         } else if (!agentState.running) {
           setSlowModeSupported(undefined);
           applyQueueStateSnapshot(queueRevision, null);
-          applyQueueProgress(null);
+          applyQueueProgress(null, queueProgressFrames);
         }
         if (showLoading) setLoading(false);
         return { context: d.context, agentState };
@@ -1143,13 +1152,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const refreshAgentSnapshots = useCallback(async (sid: string) => {
     const queueRevision = ++queueSeqRef.current;
+    const queueProgressFrames = queueProgressFramesRef.current;
     const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok || !hookAliveRef.current || sessionIdRef.current !== sid) return;
       const data = await res.json() as { state?: AgentStateResponse };
       applyQueueStateSnapshot(queueRevision, data.state?.queuedMessages);
-      applyQueueProgress(data.state?.queueProgress);
+      applyQueueProgress(data.state?.queueProgress, queueProgressFrames);
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, data.state?.skillDiagnostics);
     } catch {
       // The next live update or state snapshot heals these views.
@@ -1774,6 +1784,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (token === null) return;
     try {
       const queueRevision = ++queueSeqRef.current;
+      const queueProgressFrames = queueProgressFramesRef.current;
       const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -1796,7 +1807,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // And the only reliable re-sync for a missed subagent lifecycle frame.
       void refreshSubagentRoster(sid);
       applyQueueStateSnapshot(queueRevision, state?.queuedMessages);
-      applyQueueProgress(state?.queueProgress);
+      applyQueueProgress(state?.queueProgress, queueProgressFrames);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       // Mid-run, not after it: context usage grows with every token and the
@@ -2037,6 +2048,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "queue_progress":
+        queueProgressFramesRef.current += 1;
         applyQueueProgress(event);
         break;
       case "queue_update": {
@@ -2135,6 +2147,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           const queueRevision = ++queueSeqRef.current;
+          const queueProgressFrames = queueProgressFramesRef.current;
           const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
             .then((r) => (r.ok ? r.json() as Promise<{ state?: AgentStateResponse }> : null))
@@ -2145,7 +2158,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // The queue does not depend on a model: an exited wrapper still
               // means nothing is queued.
               applyQueueStateSnapshot(queueRevision, d.state?.queuedMessages);
-              applyQueueProgress(d.state?.queueProgress);
+              applyQueueProgress(d.state?.queueProgress, queueProgressFrames);
               applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, d.state?.skillDiagnostics);
               if (!d.state?.model) return;
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);

@@ -36,6 +36,9 @@ export interface QueueProgressItem {
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** Still `queued`, but omp's queue no longer holds it: it was taken and has
+   *  not reached the transcript yet. Edit/Delete/Steer cannot act on it. */
+  departed?: true;
 }
 
 /** Wire shape (`get_state.queueProgress` and `queue_progress` frames). */
@@ -48,7 +51,7 @@ export interface QueueProgressSnapshot {
 
 const QUEUE_STATUSES: readonly QueueProgressStatus[] = ["queued", "running", "done", "failed", "cancelled"];
 
-interface Entry extends QueueProgressItem {
+interface Entry extends Omit<QueueProgressItem, "departed"> {
   /** Creation order, the final tie-breaker everywhere. */
   seq: number;
   /** Index in omp's queue while queued. */
@@ -58,6 +61,9 @@ interface Entry extends QueueProgressItem {
   departedSeq: number;
   /** Turn in which it started (follow-ups complete earlier turns' items). */
   startedTurn: number;
+  /** Started or settled by inference (a later item's delivery, the run's end)
+   *  rather than by its own transcript message; a confirmed removal overrides it. */
+  inferred: boolean;
 }
 
 const QUEUES: readonly QueueName[] = ["steering", "followUp"];
@@ -160,6 +166,7 @@ export function readQueueProgressSnapshot(value: unknown): QueueProgressSnapshot
       queuedAt: raw.queuedAt,
       ...(typeof raw.startedAt === "number" ? { startedAt: raw.startedAt } : {}),
       ...(typeof raw.finishedAt === "number" ? { finishedAt: raw.finishedAt } : {}),
+      ...(raw.departed === true ? { departed: true as const } : {}),
     });
   }
   return { epoch, revision, items: parsed };
@@ -266,6 +273,7 @@ export class QueueProgressLedger {
           departed: false,
           departedSeq: 0,
           startedTurn: 0,
+          inferred: false,
         });
       }
       changed = true;
@@ -286,7 +294,7 @@ export class QueueProgressLedger {
     // rewritten text (slash command, template); they run alongside it.
     for (const earlier of this.entries) {
       if (earlier.status === "queued" && earlier.departed && earlier.departedSeq < entry.departedSeq) {
-        this.start(earlier, now);
+        this.start(earlier, now, true);
       }
     }
     if (entry.queue === "followUp") {
@@ -312,6 +320,7 @@ export class QueueProgressLedger {
         // under a rewritten text when the run completed or failed, dropped
         // by the abort otherwise.
         this.finish(entry, outcome === "completed" ? "done" : outcome === "failed" ? "failed" : "cancelled", now);
+        entry.inferred = true;
         changed = true;
       }
     }
@@ -320,24 +329,36 @@ export class QueueProgressLedger {
 
   /** `remove_queued_message` answered `removed: true`. */
   observeRemoval(text: string, queue: QueueName, now: number): boolean {
-    const candidates = this.entries.filter((entry) => entry.status === "queued" && entry.queue === queue && entry.text === text);
-    // The snapshot that dropped it usually arrives first (departed); without
-    // it, omp removed the first pending match.
-    const entry = candidates.filter((item) => item.departed).sort((a, b) => a.departedSeq - b.departedSeq)[0]
-      ?? candidates.sort((a, b) => a.position - b.position || a.seq - b.seq)[0];
+    const matches = this.entries.filter((entry) => entry.queue === queue && entry.text === text);
+    // The snapshot that dropped it arrives first (departed). A later item's
+    // delivery or the run's end may have settled it by inference before this
+    // reply: the removal proves omp never ran it. Without either, omp removed
+    // the first pending match.
+    const entry = matches.filter((item) => item.status === "queued" && item.departed).sort((a, b) => a.departedSeq - b.departedSeq)[0]
+      ?? matches.filter((item) => item.inferred && item.status !== "cancelled").sort((a, b) => a.departedSeq - b.departedSeq)[0]
+      ?? matches.filter((item) => item.status === "queued").sort((a, b) => a.position - b.position || a.seq - b.seq)[0];
     if (!entry) return false;
+    entry.startedAt = undefined;
     this.finish(entry, "cancelled", now);
     return this.bump(true);
+  }
+
+  /** The newest entry so far; {@link observeAbort} leaves later entries alone. */
+  boundary(): number {
+    return this.seq;
   }
 
   /**
    * `abort` / `abort_and_restore_queue` answered. The run's own `agent_end`
    * marks running items failed; this settles the queue: items omp took but
    * never recorded were dropped, and `restoreQueue` withdraws everything.
+   * Only entries up to `boundary` (taken before the abort was sent) are
+   * settled: a prompt queued after it can reach the ledger before the reply.
    */
-  observeAbort({ restoreQueue }: { restoreQueue: boolean }, now: number): boolean {
+  observeAbort({ restoreQueue, boundary }: { restoreQueue: boolean; boundary: number }, now: number): boolean {
     let changed = false;
     for (const entry of this.entries) {
+      if (entry.seq > boundary) continue;
       if (entry.status === "running") {
         this.finish(entry, "failed", now);
         changed = true;
@@ -374,11 +395,12 @@ export class QueueProgressLedger {
       .sort((a, b) => QUEUES.indexOf(a.queue) - QUEUES.indexOf(b.queue) || a.position - b.position || a.seq - b.seq)[0];
   }
 
-  private start(entry: Entry, now: number): void {
+  private start(entry: Entry, now: number, inferred = false): void {
     entry.status = "running";
     entry.departed = false;
     entry.startedAt = now;
     entry.startedTurn = this.turn;
+    entry.inferred = inferred;
   }
 
   private finish(entry: Entry, status: "done" | "failed" | "cancelled", now: number): void {
@@ -402,11 +424,12 @@ function publicItem(entry: Entry): QueueProgressItem {
     queuedAt: entry.queuedAt,
     ...(entry.startedAt !== undefined ? { startedAt: entry.startedAt } : {}),
     ...(entry.finishedAt !== undefined ? { finishedAt: entry.finishedAt } : {}),
+    ...(entry.status === "queued" && entry.departed ? { departed: true as const } : {}),
   };
 }
 
 export interface QueuePanelItem extends QueueProgressItem {
-  /** Still in omp's queue, so Edit/Delete/Steer can act on it. */
+  /** The first chip with its text in omp's queue, so Edit/Delete/Steer act on it. */
   actionable: boolean;
 }
 
@@ -415,18 +438,29 @@ export interface QueuePanelItem extends QueueProgressItem {
  * queue snapshot deciding which pending items can still be edited. A chip the
  * ledger has not reported yet (HTTP and SSE can reorder) still shows, so the
  * panel never hides something omp will run.
+ *
+ * omp's queue commands carry only the text and act on the first match, so of
+ * several identical pending items only the first offers them; a departed item
+ * left omp's queue and never claims a chip.
  */
 export function buildQueuePanelItems(progress: QueueProgressSnapshot | null, queue: QueuedMessages | null): QueuePanelItem[] {
-  const chips: Record<QueueName, string[]> = { steering: [...(queue?.steering ?? [])], followUp: [...(queue?.followUp ?? [])] };
+  const chips: Record<QueueName, readonly string[]> = { steering: queue?.steering ?? [], followUp: queue?.followUp ?? [] };
+  const claimed: Record<QueueName, boolean[]> = {
+    steering: chips.steering.map(() => false),
+    followUp: chips.followUp.map(() => false),
+  };
+  const firstOfText = (name: QueueName, index: number) => chips[name].indexOf(chips[name][index]) === index;
   const items: QueuePanelItem[] = (progress?.items ?? []).map((item) => {
-    if (item.status !== "queued") return { ...item, actionable: false };
-    const index = chips[item.queue].indexOf(item.text);
-    if (index >= 0) chips[item.queue].splice(index, 1);
-    return { ...item, actionable: index >= 0 };
+    if (item.status !== "queued" || item.departed) return { ...item, actionable: false };
+    const index = chips[item.queue].findIndex((text, position) => !claimed[item.queue][position] && text === item.text);
+    if (index < 0) return { ...item, actionable: false };
+    claimed[item.queue][index] = true;
+    return { ...item, actionable: firstOfText(item.queue, index) };
   });
   for (const name of QUEUES) {
     chips[name].forEach((text, index) => {
-      items.push({ id: `chip:${name}:${index}:${text}`, text, queue: name, status: "queued", queuedAt: 0, actionable: true });
+      if (claimed[name][index]) return;
+      items.push({ id: `chip:${name}:${index}:${text}`, text, queue: name, status: "queued", queuedAt: 0, actionable: firstOfText(name, index) });
     });
   }
   return items;

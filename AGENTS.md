@@ -378,9 +378,13 @@ during the wait.
   turn and finishes nothing); a terminal `agent_end` → done, or failed when its
   last assistant message stopped with `error`/`aborted` (a failed prompt
   `response` too); `remove_queued_message` `removed: true` and
-  `abort_and_restore_queue` → cancelled. Verified frame order (omp 18.12.6):
-  every follow-up of one prompt runs in ONE agent run (no `agent_end` between
-  them), and the `queue_update` that drops an item precedes its user message.
+  `abort_and_restore_queue` → cancelled. A confirmed removal also overrides a
+  status the ledger only inferred (started alongside a later delivery, or
+  settled by the run's end) when the reply is handled after those frames. An
+  abort settles only entries that existed when it was sent (`boundary()`).
+  Verified frame order (omp 18.12.6): every follow-up of one prompt runs in
+  ONE agent run (no `agent_end` between them), and the `queue_update` that
+  drops an item precedes its user message.
 - Items are matched by text and order. Snapshot diffs use an LCS that marks
   the EARLIEST duplicate as the one that left (omp delivers from the front and
   removes the first match); a departed item whose text never shows up (slash
@@ -389,10 +393,14 @@ during the wait.
   queue, so those items stay queued.
 - Exposure: `get_state.queueProgress` (`{ epoch, revision, items }`) and a
   `queue_progress` frame after every change, so every tab shows the same list.
-  The hook applies a snapshot only when its epoch differs or its revision is
-  newer, and clears it when the session has no live process. The panel merges
-  the ledger with omp's snapshot (`buildQueuePanelItems`): only items omp still
-  holds get Edit/Delete/Steer. A new batch starts once nothing is pending;
+  The hook applies a snapshot only when its revision is newer within the same
+  epoch; an HTTP snapshot with another epoch (or none, which clears it when the
+  session has no live process) is dropped if a `queue_progress` frame arrived
+  while it was in flight. The panel merges the ledger with omp's snapshot
+  (`buildQueuePanelItems`): only items omp still holds get Edit/Delete/Steer,
+  and of identical ones only the first (omp acts on the first match); a
+  departed item (`departed: true`, taken but not yet in the transcript) claims
+  no chip. A new batch starts once nothing is pending;
   Dismiss sends omp-web's own `dismiss_queue_progress` (never reaches omp,
   never spawns it). The ledger is in memory only: it starts empty when omp is
   respawned (`reload`, crash) or omp-web restarts, and resets when the wrapper

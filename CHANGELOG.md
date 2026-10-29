@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
-- **Queued prompts show their progress.** The composer's queue panel now keeps every prompt of the current batch after omp takes it: a "1 of 3 done" header, a check and duration for finished prompts, a spinner for the one running now, pending prompts (still editable), and failed or cancelled ones. Once all have finished it folds into a summary you can dismiss; queueing a new batch clears it too. omp-web derives the status from omp's queue snapshots and transcript events, so every tab and device on the session sees the same list. The record lives in omp-web's memory and starts empty after omp or omp-web restarts.
+- **Queued prompts show their progress.** The composer's queue panel now keeps every prompt of the current batch after omp takes it: a "1 of 3 done" header, a check and duration for finished prompts, a spinner for the one running now, pending prompts (still editable), and failed or cancelled ones. Of several identical pending prompts only the first offers Edit, Delete and Steer, because omp acts on the first match. Once all have finished it folds into a summary you can dismiss; queueing a new batch clears it too. omp-web derives the status from omp's queue snapshots and transcript events, so every tab and device on the session sees the same list. The record lives in omp-web's memory and starts empty after omp or omp-web restarts.
 
 ### Fixes & Improvements
 

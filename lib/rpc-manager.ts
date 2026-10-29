@@ -1960,6 +1960,9 @@ export class AgentSessionWrapper {
       case "abort_and_restore_queue": {
         this.responseObserved = false;
         this.responseRunActive = false;
+        // The abort settles only what was queued before it was sent: a prompt
+        // queued afterwards can reach the ledger before the reply is handled.
+        const queueBoundary = this.queueProgress.boundary();
         const result = await this.withFinalRunningNotification(async () => {
           const response: unknown = await this.proc.sendCommand({ type });
           // If the prompt was aborted before the agent loop started, no
@@ -1976,7 +1979,7 @@ export class AgentSessionWrapper {
           this.clearLiveSnapshots();
           return response;
         });
-        this.publishQueueProgress(this.queueProgress.observeAbort({ restoreQueue: type === "abort_and_restore_queue" }, Date.now()));
+        this.publishQueueProgress(this.queueProgress.observeAbort({ restoreQueue: type === "abort_and_restore_queue", boundary: queueBoundary }, Date.now()));
         return type === "abort" ? null : result ?? null;
       }
 
