@@ -25,6 +25,8 @@ const SESSIONS = [
   session("s-open", "Open task", 2),
   session("s-seen", "Seen task", 3),
 ];
+/** What /api/sessions serves; a test may swap it before mounting. */
+let sessions = SESSIONS;
 
 /** The tab side of the shared event-stream worker (lib/event-stream.ts), so a
  * test can push `running` frames on the channel the sidebar opened. */
@@ -54,7 +56,7 @@ before(() => {
   globalThis.fetch = (url) => {
     const path = String(url).split("?")[0];
     const body = path === "/api/sessions"
-      ? { sessions: SESSIONS, runningSessionIds: [] }
+      ? { sessions, runningSessionIds: [] }
       : path === "/api/projects" ? { projects: [{ path: PROJECT }] } : {};
     const response = Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } }));
     inflight.add(response);
@@ -68,6 +70,7 @@ afterEach(async () => {
   });
   cleanup();
   localStorage.clear();
+  sessions = SESSIONS;
 });
 
 function Harness({ initialSelected }) {
@@ -141,4 +144,19 @@ test("a check adopted from another tab skips the session open in this tab", asyn
   assert.equal(hasCheck("Background task"), true);
   assert.equal(hasCheck("Open task"), false);
   assert.deepEqual(JSON.parse(localStorage.getItem(UNREAD_KEY)), ["s-bg"], "the open session is written back as seen");
+});
+
+test("a nested child's check updates when only the child becomes unread", async () => {
+  sessions = [...SESSIONS, { ...session("s-child", "Child task", 0), parentSessionId: "s-bg" }];
+  await mount();
+  assert.equal(hasCheck("Child task"), false);
+  // Let every startup fetch land so only the unread set changes below.
+  await act(async () => {
+    while (inflight.size > 0) await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+
+  localStorage.setItem(UNREAD_KEY, JSON.stringify(["s-child"]));
+  act(() => { window.dispatchEvent(new window.StorageEvent("storage", { key: UNREAD_KEY, newValue: '["s-child"]' })); });
+  await waitFor(() => assert.equal(hasCheck("Child task"), true));
+  assert.equal(hasCheck("Background task"), false, "the parent itself stays unmarked");
 });

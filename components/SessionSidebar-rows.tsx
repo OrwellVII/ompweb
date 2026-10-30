@@ -552,6 +552,9 @@ const SessionTreeItem = memo(function SessionTreeItem({
     if (prev.runningSessionIds.has(id) !== next.runningSessionIds.has(id)) return false;
   }
   if (prev.unreadSessionIds !== next.unreadSessionIds) {
+    // Nested rows render inside this memo boundary, so a parent must pass a
+    // changed set down even when only a descendant's unread state flipped.
+    if (prev.node.children.length > 0) return false;
     const id = prev.node.session.id;
     if (prev.unreadSessionIds.has(id) !== next.unreadSessionIds.has(id)) return false;
   }
