@@ -797,22 +797,22 @@ const SessionItem = memo(function SessionItem({
     }
   }, [renameValue, session.id, session.name, onRenamed]);
 
- const handleArchive = useCallback(async () => {
- setDeleting(true);
- try {
- const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
- if (!response.ok) {
- const body = await response.json().catch(() => null) as { code?: unknown } | null;
- setDeleting(false);
- toast.error(t(body?.code === "session_has_children" ? "sessionSidebar.archiveLeafOnly" : "sessionSidebar.archiveFailed"));
- return;
- }
- onDeleted?.(session.id);
- } catch {
- setDeleting(false);
- toast.error(t("sessionSidebar.archiveFailed"));
- }
- }, [session.id, onDeleted, t]);
+  const handleArchive = useCallback(async () => {
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { code?: unknown } | null;
+        setDeleting(false);
+        toast.error(t(body?.code === "session_has_children" ? "sessionSidebar.archiveLeafOnly" : "sessionSidebar.archiveFailed"));
+        return;
+      }
+      onDeleted?.(session.id);
+    } catch {
+      setDeleting(false);
+      toast.error(t("sessionSidebar.archiveFailed"));
+    }
+  }, [session.id, onDeleted, t]);
 
   const handleDelete = useCallback(async () => {
     if (deleting) return;
