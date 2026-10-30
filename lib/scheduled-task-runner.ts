@@ -93,7 +93,7 @@ export class ScheduledTaskRunningError extends Error {
 }
 
 /** Attempts at writing a run's final record before its lease is released;
- *  a record left "running" would read as interrupted once the lease is gone. */
+ *  a record still unwritten then is written by the next `reconcileRuns`. */
 const FINAL_RECORD_ATTEMPTS = 3;
 const FINAL_RECORD_RETRY_MS = 1_000;
 
@@ -118,7 +118,8 @@ export interface ScheduledTaskRunner {
   /** Throws ScheduledTaskRunningError while a run of the task is in flight
    *  in this or another omp-web process. */
   runNow(id: string): Promise<ScheduledTaskRun>;
-  /** Mark runs whose owning process is gone (or forgot them) as interrupted. */
+  /** Mark runs whose owning process is gone (or forgot them) as interrupted,
+   *  and write final records this process could not write when its runs ended. */
   reconcileRuns(): void;
   /** Never throws for run-time problems (they become the record), except a
    *  manual run of a task already running: ScheduledTaskRunningError. */
@@ -129,6 +130,9 @@ export interface ScheduledTaskRunner {
 export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): ScheduledTaskRunner {
   /** taskId → id of its in-flight run in this process. */
   const active = new Map<string, string>();
+  /** runId → final record of a run of this process whose write kept failing;
+   *  `reconcileRuns` writes it in place of "interrupted". */
+  const unrecorded = new Map<string, ScheduledTaskRun>();
 
   const saveRun = (run: ScheduledTaskRun) => {
     deps.update((store) => {
@@ -236,7 +240,12 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
         const movedTo = live.sessionId && live.sessionId !== run.sessionId ? live.sessionId : null;
         if (movedTo) run.sessionId = movedTo;
         // Still under the lease, so a retried write cannot race a new run.
-        await finishEnded(run, outcome.status, outcome.error);
+        try {
+          await finishEnded(run, outcome.status, outcome.error);
+        } catch (error) {
+          unrecorded.set(run.id, run);
+          throw error;
+        }
         if (movedTo) setLastSession(task.id, movedTo);
       }).catch((error: unknown) => {
         // Nobody awaits `done`; a failed history write must not become an
@@ -295,13 +304,20 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
     return started;
   }
 
-  /** Mark runs whose owning process is gone (or forgot them) as interrupted.
-   *  A run older than the longest one is gone even if its pid was reused. */
+  /** Mark runs whose owning process is gone (or forgot them) as interrupted,
+   *  and write the final records this process could not write when its runs
+   *  ended. A run older than the longest one is gone even if its pid was reused. */
   function reconcileRuns(): void {
     deps.update((store) => {
       let changed = false;
       const now = deps.now();
       for (const run of store.runs) {
+        const final = unrecorded.get(run.id);
+        if (final) {
+          Object.assign(run, final);
+          changed = true;
+          continue;
+        }
         if (run.status !== "running") continue;
         const orphaned = run.pid === null
           || (run.pid === process.pid
@@ -313,6 +329,8 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
       }
       return changed;
     });
+    // Written now, or their task and its history were deleted.
+    unrecorded.clear();
   }
 
   function list(schedulerEnabled: boolean): ScheduledTaskListResponse {

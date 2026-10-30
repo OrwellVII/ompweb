@@ -273,7 +273,8 @@ hooks/
   - a run lease `omp-web/scheduled-task-leases/<task>` is held while a run of
     that task is in flight in any instance, so a scheduled run is `skipped`
     and **Run now** is 409 there too; a run's final record is written (with
-    retries) before its lease is released;
+    retries) before its lease is released, and one that still fails is kept
+    in memory and written by the next `reconcileRuns` instead of `interrupted`;
   - every store read-modify-write runs under `scheduled-tasks.json.lock` and
     re-reads inside it.
   Running runs carry the owner `pid`; one whose owner died, that its own
