@@ -53,10 +53,11 @@ export interface ScheduledTaskRunnerDeps {
   claimSlot(taskId: string, slot: Date): boolean;
   /** Give back a claim this process made. */
   releaseSlot(taskId: string, slot: Date): void;
-  /** Cross-instance "a run of this task is in flight"; false while another
-   *  live process holds it. */
-  acquireRunLease(taskId: string): boolean;
-  releaseRunLease(taskId: string): void;
+  /** Cross-instance "a run of this task is in flight": the lease's token, or
+   *  null while another live process holds it. */
+  acquireRunLease(taskId: string): string | null;
+  /** Give back the lease `acquireRunLease` returned. */
+  releaseRunLease(taskId: string, lease: string): void;
   directoryExists(path: string): boolean;
   isProcessAlive(pid: number): boolean;
   /** Spawn a fresh session in `cwd` (no prompt sent). */
@@ -184,7 +185,8 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
     };
     // The lease covers other omp-web instances on the agent dir; `active`
     // covers this one (and lets the lease reclaim a lost record of ours).
-    if (active.has(task.id) || !deps.acquireRunLease(task.id)) {
+    const lease = active.has(task.id) ? null : deps.acquireRunLease(task.id);
+    if (lease === null) {
       if (trigger === "manual") throw new ScheduledTaskRunningError();
       finish(run, "skipped", "The previous run of this task was still running.");
       return { run, done: Promise.resolve(run) };
@@ -192,7 +194,7 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
     active.set(task.id, run.id);
     const release = () => {
       if (active.get(task.id) === run.id) active.delete(task.id);
-      deps.releaseRunLease(task.id);
+      deps.releaseRunLease(task.id, lease);
     };
 
     let session: ScheduledRunSession | null = null;

@@ -248,16 +248,22 @@ hooks/
   Completion is `waitForTurnEnd` (registered before the prompt) with a 6 h
   cap; a timeout only stops waiting, the session keeps going.
 - Several instances may share the agent dir (an installed service plus
-  `npm run dev`). Lock and lease owner files hold "<pid> <token> <expiresAt>",
-  written to a temp file and hard-linked into place (never empty, never
-  replaced); a file is reclaimed once its owner process is gone or its hold
-  expired, never sooner. A hold never outlasts the longest legitimate one (the
-  store lock 60 s, a run lease the 6 h turn cap plus 10 min), so a pid reused
-  after a crash or reboot cannot keep a file forever; a file without the
-  expiry is judged by its pid alone. Only
-  the holder of `<file>.reclaim-<token hash>` (itself an owner file) may remove
-  a stale owner's file, and only while it still holds that token, so two
-  reclaimers cannot both take it or delete a newer owner's file:
+  `npm run dev`). Lock and lease owner files hold "<pid> <token> <expiresAt>
+  <heldUntil>", written to a temp file and hard-linked into place (never
+  empty, never replaced); a file is reclaimed once its owner process is gone
+  or its hold has ended on the monotonic clock (`process.hrtime`: one clock
+  for every process on the host, never stepped with the wall clock), never
+  sooner, so setting the time never frees a live owner's file. A hold never
+  outlasts the longest legitimate one (the store lock 60 s, a run lease the
+  6 h turn cap plus 10 min), so a pid reused after a crash or reboot cannot
+  keep a file forever; a hold ending further ahead than that was taken before
+  a reboot. `<expiresAt>` (wall clock) is only for older builds: a file
+  without `<heldUntil>` is judged by its pid alone, and is stale when that
+  pid is ours. Every removal of an owner file, a reclaimer's and the owner's
+  own release alike, is made by the holder of `<file>.reclaim-<token hash>`
+  (itself an owner file) and only while the file still holds that token, so
+  two reclaimers cannot both take it and no removal deletes a newer owner's
+  file:
   - each slot fires only in the instance that creates its claim
     `omp-web/scheduled-task-claims/<task>@<slotMs>` (kept; pruned after 30 d),
     and only that instance advances the watermark: a loser that wrote it
