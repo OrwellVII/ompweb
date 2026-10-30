@@ -33,6 +33,10 @@ import {
 const SIDEBAR_STATUS_SLOT = 12;
 const SIDEBAR_STATUS_GAP = 2;
 
+/** Deadline for an archive request, error body included: a stalled answer
+ *  would otherwise leave the row dimmed with no failure toast. */
+const ARCHIVE_TIMEOUT_MS = 15_000;
+
 interface ProjectRowProps {
   project: ManagedProject;
   isActive: boolean;
@@ -799,8 +803,11 @@ const SessionItem = memo(function SessionItem({
 
   const handleArchive = useCallback(async () => {
     setDeleting(true);
+    // The signal also ends the error-body read, so a stalled body fails like the request.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new DOMException("Session archive request timed out", "TimeoutError")), ARCHIVE_TIMEOUT_MS);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST", signal: controller.signal });
       if (!response.ok) {
         const body = await response.json().catch(() => null) as { code?: unknown } | null;
         setDeleting(false);
@@ -811,6 +818,8 @@ const SessionItem = memo(function SessionItem({
     } catch {
       setDeleting(false);
       toast.error(t("sessionSidebar.archiveFailed"));
+    } finally {
+      clearTimeout(timeout);
     }
   }, [session.id, onDeleted, t]);
 

@@ -85,7 +85,7 @@ function serveList(sessions, pinnedSessionIds, onArchive) {
       return new Response(JSON.stringify({ sessions, runningSessionIds: [], runningSessions: [], pinnedSessionIds }), { status: 200 });
     }
     if (url === "/api/projects") return new Response(JSON.stringify({ projects: [{ path: "/work/proj" }] }), { status: 200 });
-    if (url === "/api/sessions/s-parent/archive" && init.method === "POST") return onArchive();
+    if (url === "/api/sessions/s-parent/archive" && init.method === "POST") return onArchive(init);
     return new Response("{}", { status: 404 });
   };
 }
@@ -98,7 +98,7 @@ async function openWorkspaceRowMenu(name) {
   });
   const user = userEvent.setup();
   await user.click(within(row).getByRole("button", { name: "Project actions" }));
-  return { user, archive: await screen.findByRole("menuitem", { name: "Archive" }) };
+  return { row, user, archive: await screen.findByRole("menuitem", { name: "Archive" }) };
 }
 
 test("a session whose only fork is pinned cannot be archived from its workspace", async () => {
@@ -123,4 +123,34 @@ test("a server refusal to archive a session with forks explains the leaf-only ru
   await user.click(archive);
   await waitFor(() => assert.ok(document.body.textContent.includes("Archive child sessions first"), "the toast names the leaf-only rule"));
   assert.ok(!document.body.textContent.includes("Failed to archive the session"));
+});
+
+test("a stalled archive error body times out into the generic failure toast", async (t) => {
+  // Headers arrive, the body never does; aborting the request's signal errors
+  // the body stream as real fetch does.
+  serveList([parent], [], ({ signal }) => new Response(new ReadableStream({
+    start(controller) { signal?.addEventListener("abort", () => controller.error(signal.reason)); },
+  }), { status: 500 }));
+  render(React.createElement(ToastProvider, null, React.createElement(SessionSidebar, { selectedSessionId: null, onSelectSession: noop, addProjectOpen: false, setAddProjectOpen: noop, onOpenArchive: noop })));
+
+  const { row, user, archive } = await openWorkspaceRowMenu("Parent session");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    // Testing Library settles each action on a zero-delay timer, which a mocked clock runs only on a tick.
+    let clicked = false;
+    const click = user.click(archive).finally(() => { clicked = true; });
+    while (!clicked) {
+      await new Promise((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(0);
+    }
+    await click;
+    assert.equal(row.style.opacity, "0.5", "the row is busy while the error body stalls");
+
+    await act(async () => { t.mock.timers.tick(15_000); });
+    assert.ok(document.body.textContent.includes("Failed to archive the session"), "the timeout surfaces the generic failure");
+    assert.equal(row.style.opacity, "1", "the row leaves its busy state");
+  } finally {
+    // Unmounting in afterEach must clear its timers on the real clock.
+    t.mock.timers.reset();
+  }
 });
