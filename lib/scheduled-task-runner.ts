@@ -133,6 +133,10 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
   /** runId → final record of a run of this process whose write kept failing;
    *  `reconcileRuns` writes it in place of "interrupted". */
   const unrecorded = new Map<string, ScheduledTaskRun>();
+  /** taskId → session of its last run here whose turn was still going when
+   *  the run stopped waiting (the turn cap): it counts as the task's run
+   *  until it goes idle, so no second session of the task starts beside it. */
+  const overrun = new Map<string, ScheduledRunSession>();
 
   const saveRun = (run: ScheduledTaskRun) => {
     deps.update((store) => {
@@ -189,7 +193,8 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
     };
     // The lease covers other omp-web instances on the agent dir; `active`
     // covers this one (and lets the lease reclaim a lost record of ours).
-    const lease = active.has(task.id) ? null : deps.acquireRunLease(task.id);
+    if (overrun.get(task.id)?.isRunning() === false) overrun.delete(task.id);
+    const lease = active.has(task.id) || overrun.has(task.id) ? null : deps.acquireRunLease(task.id);
     if (lease === null) {
       if (trigger === "manual") throw new ScheduledTaskRunningError();
       finish(run, "skipped", "The previous run of this task was still running.");
@@ -236,6 +241,8 @@ export function createScheduledTaskRunner(deps: ScheduledTaskRunnerDeps): Schedu
         () => ({ status: "completed" as const, error: null }),
         (error: unknown) => ({ status: "failed" as const, error: errorMessage(error) }),
       ).then(async (outcome) => {
+        // The wait hit the cap but the turn goes on: still this task's run.
+        if (live.isRunning()) overrun.set(task.id, live);
         // A non-owner write moves the session to a new id; follow it.
         const movedTo = live.sessionId && live.sessionId !== run.sessionId ? live.sessionId : null;
         if (movedTo) run.sessionId = movedTo;

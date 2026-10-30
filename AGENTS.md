@@ -246,7 +246,10 @@ hooks/
   the run when that session is busy rather than steering the user's turn. A
   run that would overlap the task's own in-flight run is recorded `skipped`.
   Completion is `waitForTurnEnd` (registered before the prompt) with a 6 h
-  cap; a timeout only stops waiting, the session keeps going.
+  cap; a timeout only stops waiting (the run is `failed`), the session keeps
+  going, and until that session goes idle the instance that ran it counts it
+  as the task's run: later runs there are `skipped` and **Run now** is 409
+  (checked on the live session object, never by resuming a session).
 - Several instances may share the agent dir (an installed service plus
   `npm run dev`). Lock and lease owner files hold "<pid> <token> <expiresAt>
   <heldUntil>", written to a temp file and hard-linked into place (never
